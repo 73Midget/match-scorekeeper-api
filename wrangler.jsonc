@@ -1,0 +1,19 @@
+{
+  "name": "match-scorekeeper-api",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-15",
+
+  "d1_databases": [
+    {
+      // The name this database has INSIDE your Worker code.
+      // Your code will reach it as env.DB — nothing else.
+      "binding": "DB",
+
+      "database_name": "match-scorekeeper",
+      "database_id": "23d001ff-c042-4ed5-b645-ea6429649b15",
+
+      // Folder holding the .sql migration files, applied in order.
+      "migrations_dir": "migrations"
+    }
+  ]
+}
