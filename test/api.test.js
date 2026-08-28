@@ -63,6 +63,32 @@ async function listSquads(matchKey, secret = SECRET, club = CLUB) {
 }
 
 /**
+ * GET one squad's payload.
+ *
+ * @param {string}      matchKey
+ * @param {string}      squadKey
+ * @param {number|null} revision Pin a specific revision, or null for newest.
+ * @param {string}      secret
+ * @param {string}      club
+ * @returns {Promise<{ status: number, body: any }>}
+ */
+async function getSquad(matchKey, squadKey, revision = null, secret = SECRET, club = CLUB) {
+  let url =
+    `${BASE}/v1/clubs/${encodeURIComponent(club)}` +
+    `/matches/${encodeURIComponent(matchKey)}` +
+    `/squads/${encodeURIComponent(squadKey)}`;
+
+  if (revision !== null) {
+    url += `?revision=${encodeURIComponent(revision)}`;
+  }
+
+  const response = await fetch(url, {
+    headers: { authorization: `Bearer ${secret}` },
+  });
+  return { status: response.status, body: await response.json() };
+}
+
+/**
  * Build a valid upload envelope with a payload unique to this run.
  *
  * Uploads are append-only and deduplicated by payload hash, so tests that
@@ -174,10 +200,63 @@ test("listing an unknown match returns an empty array", async () => {
   assert.deepEqual(body.squads, []);
 });
 
-test("listing returns only the newest revision of each squad", async () => {
-  const matchKey = `test-list-${Date.now()}`;
+test("downloading a squad requires a valid secret", async () => {
+  const { status } = await getSquad("any-match", "1", null, "not-the-secret");
+  assert.equal(status, 401);
+});
+
+test("downloading a squad that does not exist returns 404", async () => {
+  const { status, body } = await getSquad(`no-such-match-${Date.now()}`, "1");
+  assert.equal(status, 404);
+  assert.equal(body.error.code, "squad_not_found");
+});
+
+test("downloading returns the payload byte-for-byte", async () => {
+  const matchKey = `test-download-${Date.now()}`;
+  const payload = JSON.stringify({ entries: [{ name: "A" }, { name: "B" }], stamp: Date.now() });
+
+  await uploadSquad(envelope({ match_key: matchKey, squad_key: "1", payload }));
+
+  const { status, body } = await getSquad(matchKey, "1");
+  assert.equal(status, 200);
+  assert.equal(body.squad.payload, payload, "stored payload must match what was uploaded");
+});
+
+test("downloading defaults to the newest revision", async () => {
+  const matchKey = `test-newest-${Date.now()}`;
+  const older = JSON.stringify({ version: "older" });
+  const newer = JSON.stringify({ version: "newer" });
+
+  await uploadSquad(envelope({ match_key: matchKey, squad_key: "1", payload: older }));
+  await uploadSquad(envelope({ match_key: matchKey, squad_key: "1", payload: newer }));
+
+  const { body } = await getSquad(matchKey, "1");
+  assert.equal(body.squad.revision, 2);
+  assert.equal(body.squad.payload, newer);
+});
+
+test("an older revision is still reachable by number", async () => {
+  const matchKey = `test-history-${Date.now()}`;
+  const older = JSON.stringify({ version: "older" });
+  const newer = JSON.stringify({ version: "newer" });
+
+  await uploadSquad(envelope({ match_key: matchKey, squad_key: "1", payload: older }));
+  await uploadSquad(envelope({ match_key: matchKey, squad_key: "1", payload: newer }));
+
+  const { status, body } = await getSquad(matchKey, "1", 1);
+  assert.equal(status, 200);
+  assert.equal(body.squad.payload, older, "revision 1 must still hold the original payload");
+});
+
+test("a non-numeric revision is rejected", async () => {
+  const { status, body } = await getSquad("any-match", "1", "abc");
+  assert.equal(status, 400);
+  assert.equal(body.error.code, "invalid_revision");
+});
 
   // Two squads, and two revisions of squad 1, so the list has to pick.
+test("listing returns only the newest revision of each squad", async () => {
+  const matchKey = `test-list-${Date.now()}`;  
   await uploadSquad(envelope({ match_key: matchKey, squad_key: "1" }));
   await uploadSquad(envelope({ match_key: matchKey, squad_key: "2" }));
   const second = await uploadSquad(

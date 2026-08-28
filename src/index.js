@@ -372,6 +372,60 @@ export default {
         squads: result.results,
       });
     }
+    // Download one squad's payload. Defaults to the newest revision; an
+    // explicit ?revision=N reaches back into the history that append-only
+    // uploads preserve.
+    const downloadRoute =
+      /^\/v1\/clubs\/([^/]+)\/matches\/([^/]+)\/squads\/([^/]+)$/.exec(path);
+    if (downloadRoute && request.method === "GET") {
+      const clubId = decodeURIComponent(downloadRoute[1]);
+      const matchKey = decodeURIComponent(downloadRoute[2]);
+      const squadKey = decodeURIComponent(downloadRoute[3]);
+
+      const auth = await authenticateClub(request, env, clubId);
+      if (!auth.ok) return auth.response;
+
+      // Absent means "newest". A malformed value is rejected rather than
+      // quietly falling back, so a client bug surfaces instead of returning
+      // data the caller did not ask for.
+      const revisionParam = url.searchParams.get("revision");
+      let revision = null;
+      if (revisionParam !== null) {
+        revision = Number(revisionParam);
+        if (!Number.isInteger(revision) || revision < 1) {
+          return error(400, "invalid_revision", "Query parameter revision must be a positive integer");
+        }
+      }
+
+      const statement =
+        revision === null
+          ? env.DB.prepare(
+              `SELECT squad_key, squad_label, match_key, match_label, match_type,
+                      revision, schema_version, app_version, app_build,
+                      entry_count, content_hash, payload, uploaded_at
+                 FROM squad_uploads
+                WHERE club_id = ?1 AND match_key = ?2 AND squad_key = ?3
+                ORDER BY revision DESC
+                LIMIT 1`
+            ).bind(clubId, matchKey, squadKey)
+          : env.DB.prepare(
+              `SELECT squad_key, squad_label, match_key, match_label, match_type,
+                      revision, schema_version, app_version, app_build,
+                      entry_count, content_hash, payload, uploaded_at
+                 FROM squad_uploads
+                WHERE club_id = ?1 AND match_key = ?2 AND squad_key = ?3
+                  AND revision = ?4`
+            ).bind(clubId, matchKey, squadKey, revision);
+
+      const row = await statement.first();
+
+      if (!row) {
+        return error(404, "squad_not_found", "No upload found for that club, match, squad, and revision");
+      }
+
+      return json({ ok: true, squad: row });
+    }
+
 
     // Anything unrecognized. Returning 404 rather than a friendly default
     // means a typo in a client URL fails loudly instead of looking like it
