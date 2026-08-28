@@ -18,6 +18,12 @@
  *    them makes a hard error look like an empty result set, which is a
  *    genuinely confusing thing to debug.
  *
+ * There is deliberately no helper for "how many rows did that change". The
+ * local emulator returns meta without a `changes` field while the remote
+ * database includes one, so a row count cannot be relied on across both.
+ * Callers that need to confirm a write should re-read the row and check the
+ * value they expected.
+ *
  * SQL is passed as an argument, which is safe only because every statement in
  * these scripts is built here or hardcoded by the caller. Values that come
  * from a person must be escaped with sqlQuote below.
@@ -83,42 +89,4 @@ export function runSql(sql, remote) {
   }
 
   return JSON.parse(lines.slice(start).join("\n"))[0]?.results ?? [];
-}
-
-/**
- * Execute SQL and report how many rows it changed.
- *
- * Used by writes, where the row count is the confirmation that the statement
- * matched anything. An UPDATE that changes nothing is not an error to
- * wrangler, so the caller has to check.
- *
- * @param {string}  sql
- * @param {boolean} remote
- * @returns {number} Rows inserted, updated, or deleted.
- */
-export function runSqlChanges(sql, remote) {
-  const args = [WRANGLER, "d1", "execute", DATABASE];
-  args.push(remote ? "--remote" : "--local");
-  args.push("--command", sql, "--json");
-
-  let output;
-  try {
-    output = execFileSync(process.execPath, args, {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-  } catch (err) {
-    throw new Error(
-      "wrangler failed (" + err.code + "): " + err.message + "\n" +
-        (err.stdout ?? "") + (err.stderr ?? "")
-    );
-  }
-
-  const lines = output.split(/\r?\n/);
-  const start = lines.findIndex((line) => line.trim() === "[");
-  if (start === -1) {
-    throw new Error("No JSON found in wrangler output:\n" + output);
-  }
-
-  return JSON.parse(lines.slice(start).join("\n"))[0]?.meta?.changes ?? 0;
 }
