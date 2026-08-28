@@ -3,6 +3,11 @@
  *
  * Cloudflare Worker exposing a small JSON API for uploading squad scores and
  * syncing club rosters. See migrations/ for the database schema.
+ *
+ * Squad uploads are keyed by (club, match, device) rather than by squad label.
+ * Squad labels are free text typed at the range and two tablets can easily
+ * both be labelled "Squad 1"; keying on the device makes a collision
+ * impossible no matter what anyone names their squad.
  */
 
 /**
@@ -30,8 +35,8 @@ function json(body, status = 200) {
  * `message` is for a human reading logs. Keeping them separate means the
  * wording can change without breaking client code that checks the code.
  *
- * @param {number} status HTTP status code.
- * @param {string} code   Stable identifier, e.g. "not_found".
+ * @param {number} status  HTTP status code.
+ * @param {string} code    Stable identifier, e.g. "not_found".
  * @param {string} message Human-readable explanation.
  * @returns {Response}
  */
@@ -170,8 +175,7 @@ async function readJsonBody(request) {
  *
  * Checked here rather than relying on database constraints alone, for two
  * reasons: the caller gets a message naming the offending field instead of a
- * raw SQL error, and the checks that are not expressible as constraints
- * (payload must be a string, entry_count must be a non-negative integer) live
+ * raw SQL error, and the checks that are not expressible as constraints live
  * alongside the ones that are.
  *
  * @param {unknown} body
@@ -182,8 +186,9 @@ function validateSquadUpload(body) {
     return { ok: false, message: "Body must be a JSON object" };
   }
 
-  /** Fields that must be present, non-empty strings. */
-  const requiredStrings = ["match_key", "squad_key", "match_type", "payload"];
+  // device_id identifies the tablet, not the squad. It is required because it
+  // is the upload key; squad_key is only a label and may be empty.
+  const requiredStrings = ["match_key", "device_id", "match_type", "payload"];
   for (const field of requiredStrings) {
     if (typeof body[field] !== "string" || body[field].length === 0) {
       return { ok: false, message: `Field "${field}" must be a non-empty string` };
@@ -209,17 +214,69 @@ function validateSquadUpload(body) {
     ok: true,
     value: {
       match_key: body.match_key,
-      squad_key: body.squad_key,
+      device_id: body.device_id,
       match_type: body.match_type,
       payload: body.payload,
       schema_version: body.schema_version,
       entry_count: entryCount,
-      // Optional provenance. Defaulted rather than required so an older tablet
-      // build can still upload.
-      match_label: typeof body.match_label === "string" ? body.match_label : "",
+      // Display only, all optional. An older tablet build that omits them can
+      // still upload; the rows simply show blank labels on the compile screen.
+      squad_key: typeof body.squad_key === "string" ? body.squad_key : "",
       squad_label: typeof body.squad_label === "string" ? body.squad_label : "",
+      match_label: typeof body.match_label === "string" ? body.match_label : "",
+      device_label: typeof body.device_label === "string" ? body.device_label : "",
       app_version: typeof body.app_version === "string" ? body.app_version : "",
       app_build: typeof body.app_build === "string" ? body.app_build : "",
+    },
+  };
+}
+
+/**
+ * Validate a roster push.
+ *
+ * base_revision is the revision the client compiled from, and it is what makes
+ * the write safe: the server rejects the push if the roster has moved on
+ * since. Absent means "I believe no roster exists yet", which is only valid
+ * against a club that has never pushed one.
+ *
+ * @param {unknown} body
+ * @returns {{ ok: true, value: object } | { ok: false, message: string }}
+ */
+function validateRosterPush(body) {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return { ok: false, message: "Body must be a JSON object" };
+  }
+
+  if (typeof body.payload !== "string" || body.payload.length === 0) {
+    return { ok: false, message: 'Field "payload" must be a non-empty string' };
+  }
+
+  if (!Number.isInteger(body.schema_version) || body.schema_version < 1) {
+    return { ok: false, message: 'Field "schema_version" must be a positive integer' };
+  }
+
+  // null means "compiled against no existing roster". Any other value must be
+  // a real revision number.
+  const baseRevision = body.base_revision ?? null;
+  if (baseRevision !== null && (!Number.isInteger(baseRevision) || baseRevision < 1)) {
+    return { ok: false, message: 'Field "base_revision" must be a positive integer or null' };
+  }
+
+  const entryCount = body.entry_count ?? 0;
+  if (!Number.isInteger(entryCount) || entryCount < 0) {
+    return { ok: false, message: 'Field "entry_count" must be a non-negative integer' };
+  }
+
+  return {
+    ok: true,
+    value: {
+      payload: body.payload,
+      schema_version: body.schema_version,
+      base_revision: baseRevision,
+      entry_count: entryCount,
+      app_version: typeof body.app_version === "string" ? body.app_version : "",
+      app_build: typeof body.app_build === "string" ? body.app_build : "",
+      author: typeof body.author === "string" ? body.author : "",
     },
   };
 }
@@ -227,6 +284,9 @@ function validateSquadUpload(body) {
 export default {
   /**
    * Entry point: runs once per incoming HTTP request.
+   *
+   * Routes are checked in order; the first match returns. Anything that falls
+   * through reaches the 404 at the bottom.
    *
    * @param {Request} request
    * @param {object}  env  Bindings from wrangler.jsonc; env.DB is the database.
@@ -237,14 +297,19 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-        // Liveness check. Deliberately requires no auth and touches no data, so it
+    // Liveness check. Deliberately requires no auth and touches no data, so it
     // can answer even when the database is unreachable.
     if (path === "/health" && request.method === "GET") {
       return json({ ok: true, service: "match-scorekeeper-api" });
     }
-    
-    // Upload one squad's scores. The tablet owns its squad, so this is the
-    // only writer for a given (club, match, squad).
+
+    // ---------------------------------------------------------------------
+    // Upload one squad's scores.
+    //
+    // Keyed by device: one tablet owns its own uploads, so re-uploading
+    // creates the next revision of that device's data and never overwrites
+    // another tablet's.
+    // ---------------------------------------------------------------------
     const uploadRoute = /^\/v1\/clubs\/([^/]+)\/squads$/.exec(path);
     if (uploadRoute && request.method === "POST") {
       const clubId = decodeURIComponent(uploadRoute[1]);
@@ -261,17 +326,18 @@ export default {
       const upload = validated.value;
       const contentHash = await sha256Hex(upload.payload);
 
-      // If this exact payload is already stored, return the revision it landed
-      // as instead of writing a duplicate. A tablet that retries after a
-      // dropped connection gets the same answer as the first attempt.
+      // If this exact payload is already stored for this device, return the
+      // revision it landed as instead of writing a duplicate. A tablet
+      // retrying after a dropped connection gets the same answer as the first
+      // attempt.
       const existing = await env.DB.prepare(
         `SELECT revision, uploaded_at FROM squad_uploads
-          WHERE club_id = ?1 AND match_key = ?2 AND squad_key = ?3
+          WHERE club_id = ?1 AND match_key = ?2 AND device_id = ?3
             AND content_hash = ?4
           ORDER BY revision DESC
           LIMIT 1`
       )
-        .bind(clubId, upload.match_key, upload.squad_key, contentHash)
+        .bind(clubId, upload.match_key, upload.device_id, contentHash)
         .first();
 
       if (existing) {
@@ -283,14 +349,14 @@ export default {
         });
       }
 
-      // Next revision for this squad. Read then write, so a simultaneous
-      // upload of the same squad can lose the race — the UNIQUE constraint
-      // catches that below and the caller is asked to retry.
+      // Next revision for this device at this match. Read then write, so two
+      // simultaneous uploads from the same device could pick the same number —
+      // the UNIQUE constraint catches that below.
       const latest = await env.DB.prepare(
         `SELECT MAX(revision) AS max_revision FROM squad_uploads
-          WHERE club_id = ?1 AND match_key = ?2 AND squad_key = ?3`
+          WHERE club_id = ?1 AND match_key = ?2 AND device_id = ?3`
       )
-        .bind(clubId, upload.match_key, upload.squad_key)
+        .bind(clubId, upload.match_key, upload.device_id)
         .first();
 
       const revision = (latest?.max_revision ?? 0) + 1;
@@ -299,19 +365,23 @@ export default {
       try {
         await env.DB.prepare(
           `INSERT INTO squad_uploads
-             (club_id, match_key, squad_key, match_type, revision,
-              match_label, squad_label, schema_version, app_version, app_build,
+             (club_id, match_key, device_id, match_type, revision,
+              squad_key, squad_label, match_label, device_label,
+              schema_version, app_version, app_build,
               entry_count, content_hash, payload, uploaded_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)`
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                   ?14, ?15, ?16)`
         )
           .bind(
             clubId,
             upload.match_key,
-            upload.squad_key,
+            upload.device_id,
             upload.match_type,
             revision,
-            upload.match_label,
+            upload.squad_key,
             upload.squad_label,
+            upload.match_label,
+            upload.device_label,
             upload.schema_version,
             upload.app_version,
             upload.app_build,
@@ -322,7 +392,7 @@ export default {
           )
           .run();
       } catch (err) {
-        // Another upload of this squad claimed the same revision first.
+        // Another upload from this device claimed the same revision first.
         if (String(err).includes("UNIQUE")) {
           return error(409, "revision_conflict", "Another upload is in progress; retry");
         }
@@ -332,10 +402,14 @@ export default {
       return json({ ok: true, duplicate: false, revision, uploaded_at: uploadedAt }, 201);
     }
 
-
-    // List the squads uploaded for one match. Returns metadata only — a
-    // tablet deciding what to download should not have to pull every payload
-    // to find out what exists.
+    // ---------------------------------------------------------------------
+    // List the squads uploaded for one match.
+    //
+    // Metadata only — a tablet deciding what to compile should not have to
+    // pull every payload to find out what exists. `first_upload_for_device`
+    // flags a device this club has not seen before, which usually means a
+    // borrowed tablet and is worth showing an RO.
+    // ---------------------------------------------------------------------
     const listRoute = /^\/v1\/clubs\/([^/]+)\/matches\/([^/]+)\/squads$/.exec(path);
     if (listRoute && request.method === "GET") {
       const clubId = decodeURIComponent(listRoute[1]);
@@ -344,23 +418,30 @@ export default {
       const auth = await authenticateClub(request, env, clubId);
       if (!auth.ok) return auth.response;
 
-      // Only the newest revision of each squad. Older revisions stay in the
-      // table as history but are not what a compile should pick up.
+      // Only the newest revision per device. Older revisions stay in the table
+      // as history but are not what a compile should pick up.
       const result = await env.DB.prepare(
-        `SELECT s.squad_key, s.squad_label, s.match_type, s.revision,
-                s.entry_count, s.app_version, s.app_build, s.uploaded_at,
-                s.merged_into_roster_revision
+        `SELECT s.device_id, s.device_label, s.squad_key, s.squad_label,
+                s.match_type, s.revision, s.entry_count,
+                s.app_version, s.app_build, s.uploaded_at,
+                s.merged_into_roster_revision,
+                NOT EXISTS (
+                  SELECT 1 FROM squad_uploads prior
+                   WHERE prior.club_id = s.club_id
+                     AND prior.device_id = s.device_id
+                     AND prior.match_key <> s.match_key
+                ) AS first_upload_for_device
            FROM squad_uploads s
            JOIN (
-                 SELECT squad_key, MAX(revision) AS max_revision
+                 SELECT device_id, MAX(revision) AS max_revision
                    FROM squad_uploads
                   WHERE club_id = ?1 AND match_key = ?2
-                  GROUP BY squad_key
+                  GROUP BY device_id
                 ) latest
-             ON latest.squad_key = s.squad_key
+             ON latest.device_id = s.device_id
             AND latest.max_revision = s.revision
           WHERE s.club_id = ?1 AND s.match_key = ?2
-          ORDER BY s.squad_key`
+          ORDER BY s.squad_key, s.device_id`
       )
         .bind(clubId, matchKey)
         .all();
@@ -372,15 +453,19 @@ export default {
         squads: result.results,
       });
     }
-    // Download one squad's payload. Defaults to the newest revision; an
-    // explicit ?revision=N reaches back into the history that append-only
-    // uploads preserve.
+
+    // ---------------------------------------------------------------------
+    // Download one device's payload for a match.
+    //
+    // Defaults to the newest revision; an explicit ?revision=N reaches back
+    // into the history that append-only uploads preserve.
+    // ---------------------------------------------------------------------
     const downloadRoute =
       /^\/v1\/clubs\/([^/]+)\/matches\/([^/]+)\/squads\/([^/]+)$/.exec(path);
     if (downloadRoute && request.method === "GET") {
       const clubId = decodeURIComponent(downloadRoute[1]);
       const matchKey = decodeURIComponent(downloadRoute[2]);
-      const squadKey = decodeURIComponent(downloadRoute[3]);
+      const deviceId = decodeURIComponent(downloadRoute[3]);
 
       const auth = await authenticateClub(request, env, clubId);
       if (!auth.ok) return auth.response;
@@ -393,39 +478,170 @@ export default {
       if (revisionParam !== null) {
         revision = Number(revisionParam);
         if (!Number.isInteger(revision) || revision < 1) {
-          return error(400, "invalid_revision", "Query parameter revision must be a positive integer");
+          return error(
+            400,
+            "invalid_revision",
+            "Query parameter revision must be a positive integer"
+          );
         }
       }
 
+      // Two explicit statements rather than one assembled conditionally.
+      // Building SQL from pieces is how the parameter-binding habit erodes,
+      // and repetition is the cheaper mistake.
       const statement =
         revision === null
           ? env.DB.prepare(
-              `SELECT squad_key, squad_label, match_key, match_label, match_type,
-                      revision, schema_version, app_version, app_build,
-                      entry_count, content_hash, payload, uploaded_at
+              `SELECT device_id, device_label, squad_key, squad_label,
+                      match_key, match_label, match_type, revision,
+                      schema_version, app_version, app_build, entry_count,
+                      content_hash, payload, uploaded_at
                  FROM squad_uploads
-                WHERE club_id = ?1 AND match_key = ?2 AND squad_key = ?3
+                WHERE club_id = ?1 AND match_key = ?2 AND device_id = ?3
                 ORDER BY revision DESC
                 LIMIT 1`
-            ).bind(clubId, matchKey, squadKey)
+            ).bind(clubId, matchKey, deviceId)
           : env.DB.prepare(
-              `SELECT squad_key, squad_label, match_key, match_label, match_type,
-                      revision, schema_version, app_version, app_build,
-                      entry_count, content_hash, payload, uploaded_at
+              `SELECT device_id, device_label, squad_key, squad_label,
+                      match_key, match_label, match_type, revision,
+                      schema_version, app_version, app_build, entry_count,
+                      content_hash, payload, uploaded_at
                  FROM squad_uploads
-                WHERE club_id = ?1 AND match_key = ?2 AND squad_key = ?3
+                WHERE club_id = ?1 AND match_key = ?2 AND device_id = ?3
                   AND revision = ?4`
-            ).bind(clubId, matchKey, squadKey, revision);
+            ).bind(clubId, matchKey, deviceId, revision);
 
       const row = await statement.first();
 
       if (!row) {
-        return error(404, "squad_not_found", "No upload found for that club, match, squad, and revision");
+        return error(
+          404,
+          "squad_not_found",
+          "No upload found for that club, match, device, and revision"
+        );
       }
 
       return json({ ok: true, squad: row });
     }
 
+    // ---------------------------------------------------------------------
+    // Roster: GET the current one, PUT a newly compiled one.
+    //
+    // Unlike squads this is multi-writer — any tablet can compile and push —
+    // so PUT is conditional on base_revision. Without that check, two people
+    // compiling at once means one silently loses every shooter the other
+    // added, and a newly checked-in shooter exists nowhere else.
+    // ---------------------------------------------------------------------
+    const rosterRoute = /^\/v1\/clubs\/([^/]+)\/roster$/.exec(path);
+
+    if (rosterRoute && request.method === "GET") {
+      const clubId = decodeURIComponent(rosterRoute[1]);
+
+      const auth = await authenticateClub(request, env, clubId);
+      if (!auth.ok) return auth.response;
+
+      const row = await env.DB.prepare(
+        `SELECT revision, content_hash, payload, entry_count, schema_version,
+                app_version, app_build, base_revision, author, updated_at
+           FROM rosters
+          WHERE club_id = ?1
+          ORDER BY revision DESC
+          LIMIT 1`
+      )
+        .bind(clubId)
+        .first();
+
+      // 404 rather than an empty roster: a new tablet treats this as "start
+      // from nothing", which is different from "the roster is empty".
+      if (!row) {
+        return error(404, "roster_not_found", "This club has no roster yet");
+      }
+
+      return json({ ok: true, roster: row });
+    }
+
+    if (rosterRoute && request.method === "PUT") {
+      const clubId = decodeURIComponent(rosterRoute[1]);
+
+      const auth = await authenticateClub(request, env, clubId);
+      if (!auth.ok) return auth.response;
+
+      const parsed = await readJsonBody(request);
+      if (!parsed.ok) return parsed.response;
+
+      const validated = validateRosterPush(parsed.value);
+      if (!validated.ok) return error(400, "invalid_body", validated.message);
+
+      const push = validated.value;
+
+      const current = await env.DB.prepare(
+        `SELECT revision, author, updated_at FROM rosters
+          WHERE club_id = ?1
+          ORDER BY revision DESC
+          LIMIT 1`
+      )
+        .bind(clubId)
+        .first();
+
+      const currentRevision = current?.revision ?? null;
+
+      // The conflict check. Naming who pushed and when gives whoever hit this
+      // something actionable instead of a bare refusal.
+      if (push.base_revision !== currentRevision) {
+        return json(
+          {
+            error: {
+              code: "roster_conflict",
+              message:
+                currentRevision === null
+                  ? "Roster was expected to exist but does not"
+                  : `Roster has moved to revision ${currentRevision} since this was compiled`,
+            },
+            current_revision: currentRevision,
+            current_author: current?.author ?? null,
+            current_updated_at: current?.updated_at ?? null,
+          },
+          409
+        );
+      }
+
+      const revision = (currentRevision ?? 0) + 1;
+      const contentHash = await sha256Hex(push.payload);
+      const updatedAt = Date.now();
+
+      try {
+        await env.DB.prepare(
+          `INSERT INTO rosters
+             (club_id, revision, content_hash, payload, entry_count,
+              schema_version, app_version, app_build, base_revision, author,
+              updated_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`
+        )
+          .bind(
+            clubId,
+            revision,
+            contentHash,
+            push.payload,
+            push.entry_count,
+            push.schema_version,
+            push.app_version,
+            push.app_build,
+            push.base_revision,
+            push.author,
+            updatedAt
+          )
+          .run();
+      } catch (err) {
+        // Two pushes passed the check at the same moment; the UNIQUE
+        // constraint decided. Same remedy as a conflict: re-read and retry.
+        if (String(err).includes("UNIQUE")) {
+          return error(409, "roster_conflict", "Another push landed first; re-read and retry");
+        }
+        throw err;
+      }
+
+      return json({ ok: true, revision, updated_at: updatedAt }, 201);
+    }
 
     // Anything unrecognized. Returning 404 rather than a friendly default
     // means a typo in a client URL fails loudly instead of looking like it
