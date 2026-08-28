@@ -267,6 +267,28 @@ function validateRosterPush(body) {
     return { ok: false, message: 'Field "entry_count" must be a non-negative integer' };
   }
 
+    // Which squad uploads this compile absorbed. The server cannot work this out
+  // — it never opens a payload, and the merge rules live in the app — so the
+  // client reports it. Optional: a push that omits it simply marks nothing.
+  const mergedSquads = body.merged_squads ?? [];
+  if (!Array.isArray(mergedSquads)) {
+    return { ok: false, message: 'Field "merged_squads" must be an array' };
+  }
+  for (const entry of mergedSquads) {
+    if (
+      typeof entry !== "object" ||
+      entry === null ||
+      typeof entry.match_key !== "string" ||
+      typeof entry.device_id !== "string" ||
+      !Number.isInteger(entry.revision)
+    ) {
+      return {
+        ok: false,
+        message: 'Each merged_squads entry needs match_key, device_id, and revision',
+      };
+    }
+  }
+
   return {
     ok: true,
     value: {
@@ -274,6 +296,7 @@ function validateRosterPush(body) {
       schema_version: body.schema_version,
       base_revision: baseRevision,
       entry_count: entryCount,
+      merged_squads: mergedSquads,
       app_version: typeof body.app_version === "string" ? body.app_version : "",
       app_build: typeof body.app_build === "string" ? body.app_build : "",
       author: typeof body.author === "string" ? body.author : "",
@@ -301,6 +324,50 @@ export default {
     // can answer even when the database is unreachable.
     if (path === "/health" && request.method === "GET") {
       return json({ ok: true, service: "match-scorekeeper-api" });
+    }
+    
+        // Squads that no roster push has absorbed yet.
+    //
+    // Until a compile folds a squad in, any shooter added at check-in on that
+    // tablet exists in that upload and nowhere else. This is what catches the
+    // case that actually happens: a squad uploads after the RO has already
+    // compiled, and nothing else would say so.
+    const unmergedRoute = /^\/v1\/clubs\/([^/]+)\/squads\/unmerged$/.exec(path);
+    if (unmergedRoute && request.method === "GET") {
+      const clubId = decodeURIComponent(unmergedRoute[1]);
+
+      const auth = await authenticateClub(request, env, clubId);
+      if (!auth.ok) return auth.response;
+
+      // Newest revision per device, as elsewhere, then keep only the ones
+      // still unmarked. A squad whose newest revision is unmerged needs
+      // attention even if an older revision of it was compiled earlier.
+      const result = await env.DB.prepare(
+        `SELECT s.match_key, s.match_label, s.device_id, s.device_label,
+                s.squad_key, s.squad_label, s.match_type, s.revision,
+                s.entry_count, s.uploaded_at
+           FROM squad_uploads s
+           JOIN (
+                 SELECT match_key, device_id, MAX(revision) AS max_revision
+                   FROM squad_uploads
+                  WHERE club_id = ?1
+                  GROUP BY match_key, device_id
+                ) latest
+             ON latest.match_key = s.match_key
+            AND latest.device_id = s.device_id
+            AND latest.max_revision = s.revision
+          WHERE s.club_id = ?1
+            AND s.merged_into_roster_revision IS NULL
+          ORDER BY s.uploaded_at DESC`
+      )
+        .bind(clubId)
+        .all();
+
+      return json({
+        ok: true,
+        club: clubId,
+        unmerged: result.results,
+      });
     }
 
     // ---------------------------------------------------------------------
@@ -640,7 +707,38 @@ export default {
         throw err;
       }
 
-      return json({ ok: true, revision, updated_at: updatedAt }, 201);
+      // Mark the squad uploads this roster absorbed. Done after the insert so
+      // a failed roster write never leaves squads marked as merged into a
+      // revision that does not exist.
+      //
+      // Failure here is deliberately not fatal: the roster is already saved,
+      // and the only cost of an unmarked squad is that it still shows as
+      // pending on the compile screen. Better a false "not yet merged" than a
+      // rejected push whose roster actually landed.
+      let markedSquads = 0;
+      if (push.merged_squads.length > 0) {
+        const statements = push.merged_squads.map((entry) =>
+          env.DB.prepare(
+            `UPDATE squad_uploads
+                SET merged_into_roster_revision = ?1
+              WHERE club_id = ?2 AND match_key = ?3 AND device_id = ?4
+                AND revision = ?5
+                AND merged_into_roster_revision IS NULL`
+          ).bind(revision, clubId, entry.match_key, entry.device_id, entry.revision)
+        );
+
+        try {
+          const results = await env.DB.batch(statements);
+          markedSquads = results.reduce((sum, r) => sum + (r.meta?.changes ?? 0), 0);
+        } catch {
+          markedSquads = 0;
+        }
+      }
+
+      return json(
+        { ok: true, revision, updated_at: updatedAt, marked_squads: markedSquads },
+        201
+      );
     }
 
     // Anything unrecognized. Returning 404 rather than a friendly default
