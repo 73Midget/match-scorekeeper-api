@@ -43,6 +43,26 @@ async function uploadSquad(envelope, secret = SECRET, club = CLUB) {
 }
 
 /**
+ * GET the squad list for a match.
+ *
+ * @param {string} matchKey Raw match key; encoded here since real keys contain
+ *                          slashes (they are date strings).
+ * @param {string} secret
+ * @param {string} club
+ * @returns {Promise<{ status: number, body: any }>}
+ */
+async function listSquads(matchKey, secret = SECRET, club = CLUB) {
+  const url =
+    `${BASE}/v1/clubs/${encodeURIComponent(club)}` +
+    `/matches/${encodeURIComponent(matchKey)}/squads`;
+
+  const response = await fetch(url, {
+    headers: { authorization: `Bearer ${secret}` },
+  });
+  return { status: response.status, body: await response.json() };
+}
+
+/**
  * Build a valid upload envelope with a payload unique to this run.
  *
  * Uploads are append-only and deduplicated by payload hash, so tests that
@@ -141,4 +161,38 @@ test("a changed payload creates the next revision", async () => {
   });
   assert.equal(second.status, 201);
   assert.equal(second.body.revision, 2);
+});
+
+test("listing squads requires a valid secret", async () => {
+  const { status } = await listSquads("any-match", "not-the-secret");
+  assert.equal(status, 401);
+});
+
+test("listing an unknown match returns an empty array", async () => {
+  const { status, body } = await listSquads(`no-such-match-${Date.now()}`);
+  assert.equal(status, 200);
+  assert.deepEqual(body.squads, []);
+});
+
+test("listing returns only the newest revision of each squad", async () => {
+  const matchKey = `test-list-${Date.now()}`;
+
+  // Two squads, and two revisions of squad 1, so the list has to pick.
+  await uploadSquad(envelope({ match_key: matchKey, squad_key: "1" }));
+  await uploadSquad(envelope({ match_key: matchKey, squad_key: "2" }));
+  const second = await uploadSquad(
+    envelope({
+      match_key: matchKey,
+      squad_key: "1",
+      payload: JSON.stringify({ revised: true }),
+    })
+  );
+  assert.equal(second.body.revision, 2);
+
+  const { status, body } = await listSquads(matchKey);
+  assert.equal(status, 200);
+  assert.equal(body.squads.length, 2);
+
+  const squad1 = body.squads.find((s) => s.squad_key === "1");
+  assert.equal(squad1.revision, 2, "should report the newest revision");
 });

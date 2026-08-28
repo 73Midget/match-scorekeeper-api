@@ -332,6 +332,47 @@ export default {
       return json({ ok: true, duplicate: false, revision, uploaded_at: uploadedAt }, 201);
     }
 
+
+    // List the squads uploaded for one match. Returns metadata only — a
+    // tablet deciding what to download should not have to pull every payload
+    // to find out what exists.
+    const listRoute = /^\/v1\/clubs\/([^/]+)\/matches\/([^/]+)\/squads$/.exec(path);
+    if (listRoute && request.method === "GET") {
+      const clubId = decodeURIComponent(listRoute[1]);
+      const matchKey = decodeURIComponent(listRoute[2]);
+
+      const auth = await authenticateClub(request, env, clubId);
+      if (!auth.ok) return auth.response;
+
+      // Only the newest revision of each squad. Older revisions stay in the
+      // table as history but are not what a compile should pick up.
+      const result = await env.DB.prepare(
+        `SELECT s.squad_key, s.squad_label, s.match_type, s.revision,
+                s.entry_count, s.app_version, s.app_build, s.uploaded_at,
+                s.merged_into_roster_revision
+           FROM squad_uploads s
+           JOIN (
+                 SELECT squad_key, MAX(revision) AS max_revision
+                   FROM squad_uploads
+                  WHERE club_id = ?1 AND match_key = ?2
+                  GROUP BY squad_key
+                ) latest
+             ON latest.squad_key = s.squad_key
+            AND latest.max_revision = s.revision
+          WHERE s.club_id = ?1 AND s.match_key = ?2
+          ORDER BY s.squad_key`
+      )
+        .bind(clubId, matchKey)
+        .all();
+
+      return json({
+        ok: true,
+        club: clubId,
+        match_key: matchKey,
+        squads: result.results,
+      });
+    }
+
     // Anything unrecognized. Returning 404 rather than a friendly default
     // means a typo in a client URL fails loudly instead of looking like it
     // worked.
