@@ -8,7 +8,8 @@
     "dev": "wrangler dev",
     "migrate:local": "wrangler d1 migrations apply match-scorekeeper --local",
     "test": "node --test \"test/**/*.test.js\"",
-    "create-club": "node scripts/create-club.js"
+    "create-club": "node scripts/create-club.js",
+    "backup": "node scripts/export-backup.js --remote --out backups"
   },
   "keywords": [],
   "author": "",
