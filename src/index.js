@@ -326,6 +326,20 @@ export default {
       return json({ ok: true, service: "match-scorekeeper-api" });
     }
     
+    // Credential check. Touches no data and returns no data — it exists so a
+    // tablet's setup screen can validate a pasted configuration and say
+    // plainly whether the club id and secret are good. /health is
+    // unauthenticated, so a 200 there proves only that the server is up.
+    const pingRoute = /^\/v1\/clubs\/([^/]+)\/ping$/.exec(path);
+    if (pingRoute && request.method === "GET") {
+      const clubId = decodeURIComponent(pingRoute[1]);
+
+      const auth = await authenticateClub(request, env, clubId);
+      if (!auth.ok) return auth.response;
+
+      return json({ ok: true, club: clubId });
+    }
+
         // Squads that no roster push has absorbed yet.
     //
     // Until a compile folds a squad in, any shooter added at check-in on that
@@ -338,6 +352,21 @@ export default {
 
       const auth = await authenticateClub(request, env, clubId);
       if (!auth.ok) return auth.response;
+
+      // A match that is never published leaves its uploads unclaimed forever,
+      // so an unbounded list grows without limit and buries the recent
+      // arrivals this endpoint exists to surface. The window is also the
+      // dismissal mechanism: an abandoned match ages off on its own, and a
+      // wider ?days brings it back if someone needs to look.
+      const daysParam = url.searchParams.get("days");
+      let days = 60;
+      if (daysParam !== null) {
+        days = Number(daysParam);
+        if (!Number.isInteger(days) || days < 1 || days > 3650) {
+          return error(400, "invalid_days", "Query parameter days must be an integer between 1 and 3650");
+        }
+      }
+      const cutoff = Date.now() - days * 86400000;
 
       // Newest revision per device, as elsewhere, then keep only the ones
       // still unmarked. A squad whose newest revision is unmerged needs
@@ -358,14 +387,17 @@ export default {
             AND latest.max_revision = s.revision
           WHERE s.club_id = ?1
             AND s.merged_into_roster_revision IS NULL
-          ORDER BY s.uploaded_at DESC`
+            AND s.uploaded_at >= ?2
+          ORDER BY s.uploaded_at DESC
+          LIMIT 200`
       )
-        .bind(clubId)
+        .bind(clubId, cutoff)
         .all();
 
       return json({
         ok: true,
         club: clubId,
+        days,
         unmerged: result.results,
       });
     }

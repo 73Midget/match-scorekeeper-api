@@ -489,3 +489,57 @@ test("a roster push rejects a malformed base_revision", async () => {
   assert.equal(status, 400);
   assert.match(body.error.message, /base_revision/);
 });
+
+test("ping rejects a wrong secret", async () => {
+  const response = await fetch(`${BASE}/v1/clubs/${CLUB}/ping`, {
+    headers: { authorization: "Bearer not-the-secret" },
+  });
+  assert.equal(response.status, 401);
+});
+
+test("ping confirms a good configuration", async () => {
+  const response = await fetch(`${BASE}/v1/clubs/${CLUB}/ping`, {
+    headers: { authorization: `Bearer ${SECRET}` },
+  });
+  assert.equal(response.status, 200);
+
+  const body = await response.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.club, CLUB);
+});
+
+test("unmerged rejects a malformed days parameter", async () => {
+  const response = await fetch(
+    `${BASE}/v1/clubs/${encodeURIComponent(CLUB)}/squads/unmerged?days=abc`,
+    { headers: { authorization: `Bearer ${SECRET}` } }
+  );
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).error.code, "invalid_days");
+});
+
+test("unmerged reports the window it applied", async () => {
+  const response = await fetch(
+    `${BASE}/v1/clubs/${encodeURIComponent(CLUB)}/squads/unmerged?days=7`,
+    { headers: { authorization: `Bearer ${SECRET}` } }
+  );
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).days, 7);
+});
+
+test("a fresh upload appears in the unmerged list", async () => {
+  const matchKey = `test-unmerged-${Date.now()}`;
+  const deviceId = `device-${Date.now()}`;
+
+  await uploadSquad(envelope({ match_key: matchKey, device_id: deviceId }));
+
+  const response = await fetch(
+    `${BASE}/v1/clubs/${encodeURIComponent(CLUB)}/squads/unmerged`,
+    { headers: { authorization: `Bearer ${SECRET}` } }
+  );
+  const body = await response.json();
+
+  assert.ok(
+    body.unmerged.some((s) => s.device_id === deviceId),
+    "an upload no roster has claimed should be listed"
+  );
+});
