@@ -1,13 +1,27 @@
 # Match Scorekeeper Backend — Client Integration Specification
 
-Version 1.1 — for the app-side implementation.
+Version 1.2 — for the app-side implementation.
 
 The backend is built, deployed, and tested. This specifies what the PWA must do
 to talk to it, and the client-side behaviour the backend assumes.
 
-Sections 1–6 are the API. Sections 7–10 are the workflow decisions that were
+Sections 1–6 are the API. Sections 7–11 are the workflow decisions that were
 made deliberately and are not visible from the API alone — read those before
 designing any screen.
+
+### Changes since 1.1
+
+- **§3.1 — the match key format changed.** v1.1 claimed `match_type` was part
+  of the server-side key. It was not; the claim was written from design intent
+  and did not match the schema. An indoor and an outdoor match on the same date
+  collided, and a tablet used for both would have had its second upload
+  recorded as a revision of the first — silently hiding the earlier squad. The
+  match type is now folded into the key client-side. **Any client written
+  against v1.1 must be updated.**
+- **§4.2 — `GET /v1/clubs/{clubId}/ping` added.** An authenticated,
+  data-free endpoint for validating a pasted configuration at setup.
+- **§4.9 — the unmerged list is now time-scoped**, defaulting to 60 days with
+  an optional `?days=`. Previously unbounded.
 
 ---
 
@@ -35,7 +49,7 @@ Do not design client behaviour that depends on any of these:
   one.
 - **No judgement about ambiguous data.** Two squads sharing a label, a
   replacement tablet, a missing squad — the server reports what exists and the
-  RO decides what it means. See §10.
+  RO decides what it means. See §11.
 
 The server's job is transport and durability. Every decision about what the
 data *means* belongs to the app, and every ambiguous decision belongs to the
@@ -65,12 +79,18 @@ Decoded:
 const config = JSON.parse(atob(blob.trim()));
 ```
 
-Validate all three fields are present, non-empty strings before storing. A
-truncated paste should fail loudly at setup, not with a 401 at the range.
+Validate all three fields are present, non-empty strings, then confirm them
+against the server with `GET /ping` (§4.2) before saving. A truncated paste
+should fail at setup, not with a 401 at the range.
 
 **The blob is a credential.** It contains the shared secret in plaintext. Treat
 a screenshot or an emailed copy the way you would treat the secret itself. The
 setup screen should say so.
+
+**Store it under its own key, never inside match metadata.** The app exports
+match metadata wholesale inside every backup, every shared squad file, and
+every uploaded payload. A secret stored there would be transmitted to the
+server, copied to every other tablet, and written into every database backup.
 
 ### 2.2 Stored settings
 
@@ -78,7 +98,7 @@ setup screen should say so.
 |---|---|---|
 | `serverUrl` | config blob | Blank by default. Blank means fully offline; make no network calls at all. |
 | `clubId` | config blob | Opaque. Never parsed or displayed as meaningful. |
-| `secret` | config blob | Bearer token on every request. |
+| `secret` | config blob | Bearer token on every request. Own storage key (§2.1). |
 | `deviceId` | generated once | See §2.3. |
 | `deviceLabel` | typed by the user | e.g. "Club Tablet 2". Display only. |
 | `dataClubId` | tracked | Which club the local data belongs to. See §2.4. |
@@ -105,7 +125,7 @@ anyone types.
 is reinstalled, the device id is lost and a new one is generated. A re-upload
 afterwards lands as a *new row* rather than a new revision. The old upload is
 not lost, but the compile screen shows the same squad twice under two device
-ids — which the RO resolves the same way as any other duplicate (§10.2).
+ids — which the RO resolves the same way as any other duplicate (§11.2).
 
 Do not work around this. The workaround would be worse than the problem.
 
@@ -118,7 +138,7 @@ Store the club id that local data belongs to. When sync is reconfigured with a
 > have not been uploaded to the new one. Upload before downloading, or the local
 > data may be replaced.
 
-This matters during disaster recovery (§9.2), where the natural instinct — sync
+This matters during disaster recovery (§10.2), where the natural instinct — sync
 immediately after reconfiguring — pulls an empty roster and can overwrite local
 state that is the only surviving copy of a shooter's details.
 
@@ -126,46 +146,59 @@ state that is the only surviving copy of a shooter's details.
 
 ## 3. Keys and normalization
 
-The server treats `match_key` as an **opaque identifier**. It never parses it.
-The app is entirely responsible for two tablets at the same match producing the
-*same* string — a real hazard, since the match field is free text typed
-independently on each tablet.
+The server treats `match_key` as an **opaque identifier**. It never parses it,
+and it is not composed with any other field. The app is entirely responsible
+for producing a key that is the same across tablets at one match and different
+across distinct matches.
 
-### 3.1 Required normalization
-
-Apply this exact transformation to `meta.match` and use the result as
-`match_key`:
+### 3.1 Required key format
 
 ```js
-function matchKey(rawMatch) {
-  return String(rawMatch || "")
+function matchKey(rawMatch, matchType) {
+  const normalized = String(rawMatch || "")
     .trim()
     .toLowerCase()
     .replace(/\s+/g, " ");
+
+  return matchType + "|" + normalized;
 }
 ```
 
-Trim, lowercase, collapse internal whitespace runs to a single space. Nothing
-else — no punctuation stripping, no date reformatting.
+Producing `outdoor|8/15/2026`.
 
-This mirrors the app's existing `normMatch()` used in the merge guard. Keeping
-them identical is the point: if the upload key and the merge comparison
-disagree, data the app considers one match is split into two on the server.
+Two parts, both required:
 
-Send the raw typed value as `match_label` for display.
+**The normalization** — trim, lowercase, collapse internal whitespace runs to a
+single space, nothing else. This mirrors the app's existing `normMatch()` used
+in the merge guard. Keeping them identical is the point: if the upload key and
+the merge comparison disagree, data the app considers one match is split into
+two on the server.
 
-### 3.2 Known collision — two matches on one day
+**The match type prefix** — this is load-bearing, not decoration.
 
-Match keys derive from a date string. Two matches on the same date, same club,
-same match type collide into one key, and the compile screen shows six squads
-where the RO expects three.
+The server's uniqueness constraint is `(club_id, match_key, device_id,
+revision)`. `match_type` is stored but is **not** part of any key or query.
+Without the prefix, an indoor morning match and an outdoor evening match on the
+same date share a key. A tablet used for both would have its evening upload
+recorded as *revision 2* of the morning's series — and since the list endpoint
+returns only the newest revision per device, the indoor squad disappears with
+no error anywhere.
 
-Different match types do **not** collide: `match_type` is part of the key, so an
-indoor morning and an outdoor evening on the same date stay separate.
+This is exactly the failure `device_id` exists to prevent, arriving by a
+different route. The prefix closes it.
 
-Mitigation is procedural: use a distinguishing match name ("8/15/2026 PM") when
-running more than one match of the same type in a day. A gentle nudge in the UI
-is reasonable; enforcement is not.
+Send `match_type` as its own field as well; it is stored for display and
+validated by the server. Send the raw typed value as `match_label`.
+
+### 3.2 Remaining collision — two matches, one day, same type
+
+Two matches on the same date, same club, **and the same match type** still
+collide into one key, and the compile screen would show six squads where the RO
+expects three.
+
+Mitigation is procedural: use a distinguishing match name ("8/15/2026 PM"). A
+gentle nudge in the UI when a match key already has uploads is reasonable;
+enforcement is not.
 
 **Do not attempt to make the key unique automatically.** A key that varies per
 tablet is far worse than a collision, because tablets stop agreeing about what
@@ -184,7 +217,7 @@ blank column, so a missing name reads as intentional rather than broken.
 
 ## 4. API reference
 
-Base URL is the configured `serverUrl`. All requests require:
+Base URL is the configured `serverUrl`. All requests except `/health` require:
 
 ```
 Authorization: Bearer <secret>
@@ -198,7 +231,7 @@ All responses are JSON. Errors have this shape:
 
 **Branch on `code`, never on `message`.** Message wording will change.
 
-Path segments must be URL-encoded — match keys contain slashes.
+Path segments must be URL-encoded. Match keys contain both a pipe and slashes.
 
 ### 4.1 Health
 
@@ -208,10 +241,32 @@ GET /health
 
 No auth. Returns `200 {"ok":true,"service":"match-scorekeeper-api"}`.
 
-Does not touch the database, so a 200 here with failures elsewhere means the
-database, not the network.
+Proves the server is reachable and nothing else. **It does not validate
+credentials** — use `/ping` for that.
 
-### 4.2 Upload a squad
+Does not touch the database, so a 200 here with failures elsewhere points at
+the database rather than the network.
+
+### 4.2 Ping — validate a configuration
+
+```
+GET /v1/clubs/{clubId}/ping
+```
+
+| Status | Body |
+|---|---|
+| 200 | `{"ok":true,"club":"x3222665"}` |
+| 401 | `unauthorized` |
+
+Touches no data and returns none. This is the endpoint for a setup screen's
+"test connection" button and for validating a pasted config blob before saving
+it.
+
+Use this rather than inferring validity from a data endpoint. Treating a
+`404 roster_not_found` as "credentials are good" works, but it overloads a data
+endpoint for an auth check and reads like a bug to whoever maintains it next.
+
+### 4.3 Upload a squad
 
 ```
 POST /v1/clubs/{clubId}/squads
@@ -219,7 +274,7 @@ POST /v1/clubs/{clubId}/squads
 
 ```json
 {
-  "match_key": "8/15/2026",
+  "match_key": "outdoor|8/15/2026",
   "device_id": "550e8400-e29b-41d4-a716-446655440000",
   "match_type": "outdoor",
   "payload": "{\"appName\":\"Match Scorekeeper\",...}",
@@ -260,7 +315,7 @@ surfaced as one.
 Uploads are append-only: each changed payload from a device becomes the next
 revision. Nothing is ever overwritten. Uploading repeatedly is free.
 
-### 4.3 List squads for a match
+### 4.4 List squads for a match
 
 ```
 GET /v1/clubs/{clubId}/matches/{matchKey}/squads
@@ -268,11 +323,14 @@ GET /v1/clubs/{clubId}/matches/{matchKey}/squads
 
 Returns the **newest revision of each device** at that match. Metadata only.
 
+Because `match_key` includes the match type (§3.1), this cannot return squads
+from a different match type. No filtering is needed client-side.
+
 ```json
 {
   "ok": true,
   "club": "x3222665",
-  "match_key": "8/15/2026",
+  "match_key": "outdoor|8/15/2026",
   "squads": [
     {
       "device_id": "550e8400-…",
@@ -299,9 +357,9 @@ uploaded yet" — not an error.
   at any other match. Usually a borrowed tablet, occasionally a
   misconfiguration. Show it as an informational flag.
 - **`merged_into_roster_revision`** is `null` until a roster push claims this
-  upload. See §4.8.
+  upload. See §4.9.
 
-### 4.4 Download a squad
+### 4.5 Download a squad
 
 ```
 GET /v1/clubs/{clubId}/matches/{matchKey}/squads/{deviceId}
@@ -317,7 +375,7 @@ be compared against the good one that preceded it.
 Response contains the full row including `payload`, byte-identical to what was
 uploaded. `404 squad_not_found` if nothing matches.
 
-### 4.5 Get the roster
+### 4.6 Get the roster
 
 ```
 GET /v1/clubs/{clubId}/roster
@@ -340,15 +398,23 @@ GET /v1/clubs/{clubId}/roster
 
 `404 roster_not_found` when the club has never pushed one. **This is a normal
 state for a new club, not an error.** A tablet setting up against a fresh
-backend should treat it as "start from empty" and offer to push, not display a
-failure.
+backend should treat it as "start from empty" and offer to push.
 
 The roster payload has the same shape as a squad payload — the app produces it
 by exporting with scores cleared.
 
+**Generate roster payloads with an empty match label.** A roster is the club's
+shooter list, not a match artifact; a label claiming otherwise is misleading in
+storage and awkward on restore. The app's merge guard, which refuses payloads
+whose match label differs from the current match, must also be skipped for
+roster merges — a roster has no scores, so the guard is protecting against
+nothing there. Do both: clearing the label is honest data, skipping the guard
+is the actual fix, and relying on the label alone couples two things that
+should not be coupled.
+
 **Retain `revision`.** It is required for the next push.
 
-### 4.6 Push a roster
+### 4.7 Push a roster
 
 ```
 PUT /v1/clubs/{clubId}/roster
@@ -364,7 +430,7 @@ PUT /v1/clubs/{clubId}/roster
   "app_build": "2026-08-15",
   "author": "Club Tablet 2",
   "merged_squads": [
-    { "match_key": "8/15/2026", "device_id": "550e8400-…", "revision": 2 }
+    { "match_key": "outdoor|8/15/2026", "device_id": "550e8400-…", "revision": 2 }
   ]
 }
 ```
@@ -373,7 +439,7 @@ PUT /v1/clubs/{clubId}/roster
 GET returned 404.
 
 `merged_squads` lists the squad uploads this compile absorbed. Optional but
-strongly recommended — it is what lets §4.8 work.
+strongly recommended — it is what lets §4.9 work.
 
 | Status | Meaning |
 |---|---|
@@ -381,7 +447,7 @@ strongly recommended — it is what lets §4.8 work.
 | 409 | `roster_conflict` — someone else pushed since you compiled. |
 | 400 | `invalid_body` — message names the field. |
 
-### 4.7 The conflict path — required client behaviour
+### 4.8 The conflict path — required client behaviour
 
 **This is the most important interaction in the API.**
 
@@ -415,19 +481,36 @@ The 409 body names who got there first:
 
 Cap automatic retries at three, then hand it to the user.
 
-### 4.8 Unmerged squads
+### 4.9 Unmerged squads
 
 ```
 GET /v1/clubs/{clubId}/squads/unmerged
+GET /v1/clubs/{clubId}/squads/unmerged?days=180
 ```
 
-Returns every squad upload (newest revision per device) that no roster push has
-claimed, newest first. Same field shape as §4.3.
+Returns squad uploads (newest revision per device) that no roster push has
+claimed, newest first.
+
+**Scoped to the last 60 days by default**, capped at 200 rows. `?days=` accepts
+1 to 3650; a malformed value returns `400 invalid_days`. The response echoes the
+window as `days`.
+
+The window exists because a match that is never published leaves its uploads
+unclaimed permanently, and an unbounded list buries the recent arrivals this
+endpoint exists to surface.
+
+**The window is also the dismissal mechanism.** There is no way to mark an
+upload as deliberately ignored, and none is planned: an abandoned match ages off
+the list on its own, and a wider `days` brings it back if someone needs to look.
+A `dismissed` flag would need its own storage and its own UI to solve a problem
+the window already solves.
+
+Same field shape as §4.4, plus `match_key` and `match_label`.
 
 This catches the case that actually happens: a squad uploads twenty minutes
 after the RO compiled, and nothing else would say so.
 
-### 4.9 Compiled match results
+### 4.10 Compiled match results
 
 A compiled match is uploaded through the same squad endpoint, using the reserved
 device id **`"compiled"`** and a `device_label` of `"Compiled results"`.
@@ -454,6 +537,7 @@ no polling, and no automatic activity while a match is in progress.
 
 | Moment | Action | Triggered by |
 |---|---|---|
+| Configuring sync | `GET /ping` | Saving a config blob |
 | Setup, before a match | `GET /roster` | "Get latest shooter list" |
 | Mid-match | `POST /squads` | The existing backup button (§5.2) |
 | End of match | `POST /squads` | "Upload squad" |
@@ -484,17 +568,16 @@ into "the server has it" — which is the whole point.
 
 ### 5.3 Retry and the pending badge
 
-When an upload fails, the app retries a small number of times (three is
-reasonable) with a short delay. If it still fails:
+When an upload fails, retry a small number of times (three is reasonable) with a
+short delay. If it still fails:
 
 - Mark the squad as pending upload
 - Show a **persistent badge that survives app restarts**:
 
   > ⚠ Squad 3 from 8/15/2026 has not been uploaded. Tap to retry.
 
-The badge stays until the upload succeeds. This is the mechanism that stops a
-tablet going home with an unuploaded squad and nobody noticing until the RO is
-compiling.
+The badge stays until the upload succeeds. This is what stops a tablet going
+home with an unuploaded squad and nobody noticing until the RO is compiling.
 
 Retrying when the app is next opened with a pending upload and a configured
 server is acceptable — the app is open and the person is looking at it. Do not
@@ -520,8 +603,9 @@ condition worth mentioning.
 | `invalid_body` | 400 | Validation failed | Bug — log the message |
 | `bad_request` | 400 | Malformed JSON | Bug |
 | `invalid_revision` | 400 | Bad `?revision` | Bug |
+| `invalid_days` | 400 | Bad `?days` | Bug |
 | `revision_conflict` | 409 | Simultaneous upload | Retry once |
-| `roster_conflict` | 409 | Stale roster compile | Re-read and merge (§4.7) |
+| `roster_conflict` | 409 | Stale roster compile | Re-read and merge (§4.8) |
 
 ---
 
@@ -631,9 +715,9 @@ This is stated explicitly because it is not inferable from the data.
 
 ### 9.1 Normal backup
 
-The club exports the database monthly and stores the dump outside Cloudflare.
-Backend-side task, documented in the README. The export contains every shooter's
-name, email, and phone in plaintext.
+The club exports the database monthly (`npm run backup`) and stores the dump
+outside Cloudflare. Backend-side task, documented in the README. The export
+contains every shooter's name, email, and phone in plaintext.
 
 ### 9.2 Rebuilding from tablets
 
@@ -686,7 +770,7 @@ Two genuinely different squads that both got labelled "Squad 1". **Compile both.
 
 ```
 Squad 3 — Club Tablet 3 — 4 shooters — 7:38 PM
-Squad 3 — Club Tablet 4 — 8:15 PM — 6 shooters
+Squad 3 — Club Tablet 4 — 6 shooters — 8:15 PM
 ```
 A replacement tablet took over. **Compile one.**
 
@@ -736,8 +820,8 @@ clocks for ordering — tablets at a range are not reliably in sync.
 the payload shape changes; the server stores it so a future reader can tell
 which format it is looking at.
 
-**Retention.** No purge exists yet. If one is added, a squad upload must never
-be deleted while its `merged_into_roster_revision` is null — it may hold the only
+**Retention.** No purge exists. If one is added, a squad upload must never be
+deleted while its `merged_into_roster_revision` is null — it may hold the only
 copy of a shooter added at check-in and never compiled.
 
 **Encryption is not implemented.** Payloads are stored as plain JSON. A later
