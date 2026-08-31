@@ -24,7 +24,10 @@
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      ...CORS_HEADERS,
+    },
   });
 }
 
@@ -43,6 +46,31 @@ function json(body, status = 200) {
 function error(status, code, message) {
   return json({ error: { code, message } }, status);
 }
+
+/**
+ * CORS headers for browser clients.
+ *
+ * The PWA runs from a different origin than the Worker, so browsers require
+ * these before they will deliver a response to page JavaScript.
+ *
+ * Allowing any origin is safe here specifically because authentication is a
+ * bearer token, not a cookie. A browser attaches cookies automatically, which
+ * is what makes cross-origin requests dangerous for cookie-authenticated APIs;
+ * a bearer token has to be set deliberately by code that already holds the
+ * secret. A hostile page can reach this API either way — it could always have
+ * curled it — but it still cannot authenticate.
+ *
+ * If cookies or Access-Control-Allow-Credentials are ever added, this reasoning
+ * no longer holds and the wildcard must become an allowlist.
+ */
+const CORS_HEADERS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+  "access-control-allow-headers": "authorization, content-type",
+  // Cache the preflight so a browser is not asking permission before every
+  // request during a match.
+  "access-control-max-age": "86400",
+};
 
 /**
  * Compute the hex SHA-256 of a string.
@@ -319,6 +347,14 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname;
+
+    // Preflight. Browsers send OPTIONS before any request carrying an
+    // Authorization header and block the real request if it goes unanswered.
+    // Handled before routing because the browser is asking whether it may send
+    // the request at all, not about any particular endpoint.
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
 
     // Liveness check. Deliberately requires no auth and touches no data, so it
     // can answer even when the database is unreachable.
