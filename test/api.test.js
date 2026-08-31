@@ -506,6 +506,11 @@ test("ping confirms a good configuration", async () => {
   const body = await response.json();
   assert.equal(body.ok, true);
   assert.equal(body.club, CLUB);
+  assert.equal(
+    typeof body.club_name,
+    "string",
+    "the display name is what makes ping a useful setup confirmation"
+  );
 });
 
 test("unmerged rejects a malformed days parameter", async () => {

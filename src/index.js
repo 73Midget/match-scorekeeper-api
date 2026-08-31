@@ -368,13 +368,26 @@ export default {
     // unauthenticated, so a 200 there proves only that the server is up.
     const pingRoute = /^\/v1\/clubs\/([^/]+)\/ping$/.exec(path);
     if (pingRoute && request.method === "GET") {
-      const clubId = decodeURIComponent(pingRoute[1]);
+    const clubId = decodeURIComponent(pingRoute[1]);
 
-      const auth = await authenticateClub(request, env, clubId);
-      if (!auth.ok) return auth.response;
+    const auth = await authenticateClub(request, env, clubId);
+    if (!auth.ok) return auth.response;
 
-      return json({ ok: true, club: clubId });
-    }
+    // The display name is what makes this a useful confirmation. A club id
+    // is opaque by design, so an RO comparing "m78p9nw7" by eye cannot tell
+    // a valid blob from the right one. Returned only after authentication,
+    // so it cannot be used to enumerate which club ids exist.
+    const club = await env.DB.prepare(
+      "SELECT display_name FROM clubs WHERE club_id = ?1"
+      )
+        .bind(clubId)
+        .first();
+
+      return json({
+        ok: true,
+        club: clubId,
+        club_name: club?.display_name ?? "",
+      });    }
 
         // Squads that no roster push has absorbed yet.
     //
