@@ -548,3 +548,66 @@ test("a fresh upload appears in the unmerged list", async () => {
     "an upload no roster has claimed should be listed"
   );
 });
+
+test("listing matches requires a valid secret", async () => {
+  const response = await fetch(`${BASE}/v1/clubs/${CLUB}/matches`, {
+    headers: { authorization: "Bearer not-the-secret" },
+  });
+  assert.equal(response.status, 401);
+});
+
+test("listing matches rejects a malformed days parameter", async () => {
+  const response = await fetch(`${BASE}/v1/clubs/${CLUB}/matches?days=abc`, {
+    headers: { authorization: `Bearer ${SECRET}` },
+  });
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).error.code, "invalid_days");
+});
+
+test("a match appears once however many squads uploaded", async () => {
+  const matchKey = `outdoor|test-matches-${Date.now()}`;
+
+  await uploadSquad(envelope({ match_key: matchKey, device_id: "tablet-a", squad_key: "1" }));
+  await uploadSquad(envelope({ match_key: matchKey, device_id: "tablet-b", squad_key: "2" }));
+  await uploadSquad(
+    envelope({
+      match_key: matchKey,
+      device_id: "tablet-a",
+      squad_key: "1",
+      payload: JSON.stringify({ revised: true }),
+    })
+  );
+
+  const response = await fetch(`${BASE}/v1/clubs/${CLUB}/matches`, {
+    headers: { authorization: `Bearer ${SECRET}` },
+  });
+  const body = await response.json();
+
+  const rows = body.matches.filter((m) => m.match_key === matchKey);
+  assert.equal(rows.length, 1, "one row per match, not per upload");
+  assert.equal(rows[0].squad_count, 2, "two devices uploaded, one of them twice");
+  assert.equal(rows[0].has_compiled, 0);
+});
+
+test("has_compiled flips once a compiled archive is uploaded", async () => {
+  const matchKey = `outdoor|test-compiled-${Date.now()}`;
+
+  await uploadSquad(envelope({ match_key: matchKey, device_id: "tablet-a", squad_key: "1" }));
+  await uploadSquad(
+    envelope({
+      match_key: matchKey,
+      device_id: "compiled",
+      device_label: "Compiled results",
+      squad_key: "",
+      payload: JSON.stringify({ compiled: true, stamp: Date.now() }),
+    })
+  );
+
+  const response = await fetch(`${BASE}/v1/clubs/${CLUB}/matches`, {
+    headers: { authorization: `Bearer ${SECRET}` },
+  });
+  const row = (await response.json()).matches.find((m) => m.match_key === matchKey);
+
+  assert.equal(row.has_compiled, 1);
+  assert.equal(row.squad_count, 1, "the compiled archive is a result, not a squad");
+});

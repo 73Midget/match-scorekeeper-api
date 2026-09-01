@@ -550,6 +550,81 @@ export default {
       return json({ ok: true, duplicate: false, revision, uploaded_at: uploadedAt }, 201);
     }
 
+    
+
+        // List the matches a club has uploads for.
+    //
+    // Without this, a compiled archive is write-only from the app's side: it
+    // can be uploaded and then only fetched again by a client that already
+    // knows the match key, which in practice means only the match currently
+    // open on that tablet.
+    //
+    // Deliberately not backed by a matches table. A match is not a thing the
+    // server creates or tracks — it is whatever match_key the tablets agreed
+    // on — so the list is derived from the uploads themselves and cannot fall
+    // out of step with them.
+    const matchListRoute = /^\/v1\/clubs\/([^/]+)\/matches$/.exec(path);
+    if (matchListRoute && request.method === "GET") {
+      const clubId = decodeURIComponent(matchListRoute[1]);
+
+      const auth = await authenticateClub(request, env, clubId);
+      if (!auth.ok) return auth.response;
+
+      // A season is the natural unit for browsing, unlike the unmerged list
+      // where recency is the entire point — hence 90 days rather than 60.
+      const daysParam = url.searchParams.get("days");
+      let days = 90;
+      if (daysParam !== null) {
+        days = Number(daysParam);
+        if (!Number.isInteger(days) || days < 1 || days > 3650) {
+          return error(400, "invalid_days", "Query parameter days must be an integer between 1 and 3650");
+        }
+      }
+      const cutoff = Date.now() - days * 86400000;
+
+      const result = await env.DB.prepare(
+        `SELECT
+            s.match_key,
+
+            -- Tablets type the match name independently, so raw labels within
+            -- one match can differ by punctuation or spacing. MAX picks one
+            -- deterministically; the normalized match_key is what actually
+            -- groups them.
+            MAX(s.match_label) AS match_label,
+
+            -- Every row in a group shares a match type, because the type is
+            -- part of the match_key. MAX only satisfies the GROUP BY.
+            MAX(s.match_type) AS match_type,
+
+            MAX(s.uploaded_at) AS last_upload_at,
+
+            -- Squads that ran, not rows stored. The reserved 'compiled' device
+            -- holds a result rather than a squad and would otherwise make every
+            -- compiled match report one squad too many.
+            COUNT(DISTINCT CASE WHEN s.device_id <> 'compiled'
+                                THEN s.device_id END) AS squad_count,
+
+            MAX(CASE WHEN s.device_id = 'compiled'
+                     THEN 1 ELSE 0 END) AS has_compiled
+
+           FROM squad_uploads s
+          WHERE s.club_id = ?1
+            AND s.uploaded_at >= ?2
+          GROUP BY s.match_key
+          ORDER BY last_upload_at DESC
+          LIMIT 200`
+      )
+        .bind(clubId, cutoff)
+        .all();
+
+      return json({
+        ok: true,
+        club: clubId,
+        days,
+        matches: result.results,
+      });
+    }
+
     // ---------------------------------------------------------------------
     // List the squads uploaded for one match.
     //
