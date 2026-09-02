@@ -747,6 +747,45 @@ export default {
       return json({ ok: true, squad: row });
     }
 
+        // List the club's roster revisions, newest first.
+    //
+    // A roster push replaces the whole list, so a bad one — pushed from a
+    // stale tablet, or with a shooter wrongly removed — is only recoverable if
+    // the previous versions are still readable. They are: the rosters table is
+    // append-only and nothing prunes it.
+    //
+    // Payloads are excluded. This answers "which revisions exist and what did
+    // each look like from the outside", and a director picking one should not
+    // have to download every roster to render the list.
+    const rosterRevisionsRoute = /^\/v1\/clubs\/([^/]+)\/roster\/revisions$/.exec(path);
+    if (rosterRevisionsRoute && request.method === "GET") {
+      const clubId = decodeURIComponent(rosterRevisionsRoute[1]);
+
+      const auth = await authenticateClub(request, env, clubId);
+      if (!auth.ok) return auth.response;
+
+      // No time window, unlike the unmerged and match lists. A rollback target
+      // can be months old, and this list is bounded by how often a club
+      // publishes rather than by how much it uploads.
+      const result = await env.DB.prepare(
+        `SELECT revision, base_revision, author, entry_count,
+                content_hash, schema_version, app_version, app_build,
+                updated_at
+           FROM rosters
+          WHERE club_id = ?1
+          ORDER BY revision DESC
+          LIMIT 200`
+      )
+        .bind(clubId)
+        .all();
+
+      return json({
+        ok: true,
+        club: clubId,
+        revisions: result.results,
+      });
+    }
+
     // ---------------------------------------------------------------------
     // Roster: GET the current one, PUT a newly compiled one.
     //
@@ -763,21 +802,57 @@ export default {
       const auth = await authenticateClub(request, env, clubId);
       if (!auth.ok) return auth.response;
 
-      const row = await env.DB.prepare(
-        `SELECT revision, content_hash, payload, entry_count, schema_version,
-                app_version, app_build, base_revision, author, updated_at
-           FROM rosters
-          WHERE club_id = ?1
-          ORDER BY revision DESC
-          LIMIT 1`
-      )
-        .bind(clubId)
-        .first();
+            // Absent means the current revision. An explicit value reaches back into
+      // the history the append-only table preserves, which is what makes a
+      // rollback possible without deleting anything.
+      const revisionParam = url.searchParams.get("revision");
+      let revision = null;
+      if (revisionParam !== null) {
+        revision = Number(revisionParam);
+        if (!Number.isInteger(revision) || revision < 1) {
+          return error(
+            400,
+            "invalid_revision",
+            "Query parameter revision must be a positive integer"
+          );
+        }
+      }
+
+      // Two explicit statements rather than one assembled conditionally, for
+      // the same reason as the squad download: building SQL from pieces is how
+      // the parameter-binding habit erodes.
+      const statement =
+        revision === null
+          ? env.DB.prepare(
+              `SELECT revision, content_hash, payload, entry_count,
+                      schema_version, app_version, app_build, base_revision,
+                      author, updated_at
+                 FROM rosters
+                WHERE club_id = ?1
+                ORDER BY revision DESC
+                LIMIT 1`
+            ).bind(clubId)
+          : env.DB.prepare(
+              `SELECT revision, content_hash, payload, entry_count,
+                      schema_version, app_version, app_build, base_revision,
+                      author, updated_at
+                 FROM rosters
+                WHERE club_id = ?1 AND revision = ?2`
+            ).bind(clubId, revision);
+
+      const row = await statement.first();
 
       // 404 rather than an empty roster: a new tablet treats this as "start
-      // from nothing", which is different from "the roster is empty".
+      // from nothing", which is different from "the roster is empty". With an
+      // explicit revision it means that revision does not exist.
       if (!row) {
-        return error(404, "roster_not_found", "This club has no roster yet");
+        return error(
+          404,
+          "roster_not_found",
+          revision === null
+            ? "This club has no roster yet"
+            : `No roster revision ${revision} for this club`
+        );
       }
 
       return json({ ok: true, roster: row });

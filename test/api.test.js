@@ -611,3 +611,93 @@ test("has_compiled flips once a compiled archive is uploaded", async () => {
   assert.equal(row.has_compiled, 1);
   assert.equal(row.squad_count, 1, "the compiled archive is a result, not a squad");
 });
+
+test("roster revisions require a valid secret", async () => {
+  const response = await fetch(`${BASE}/v1/clubs/${CLUB}/roster/revisions`, {
+    headers: { authorization: "Bearer not-the-secret" },
+  });
+  assert.equal(response.status, 401);
+});
+
+test("a superseded roster revision is still retrievable", async () => {
+  // The rollback case: publish a roster, publish a worse one, and confirm the
+  // good one is still there to publish again.
+  const before = await getRoster();
+  const startRevision = before.status === 200 ? before.body.roster.revision : null;
+
+  const good = JSON.stringify({ entries: [{ name: "A" }, { name: "B" }], stamp: Date.now() });
+  const first = await putRoster({
+    payload: good,
+    schema_version: 1,
+    base_revision: startRevision,
+    entry_count: 2,
+    author: "tablet-good",
+  });
+  assert.equal(first.status, 201);
+
+  const bad = JSON.stringify({ entries: [{ name: "A" }], stamp: Date.now() });
+  const second = await putRoster({
+    payload: bad,
+    schema_version: 1,
+    base_revision: first.body.revision,
+    entry_count: 1,
+    author: "tablet-oops",
+  });
+  assert.equal(second.status, 201);
+
+  // The current roster is the bad one.
+  const current = await getRoster();
+  assert.equal(current.body.roster.payload, bad);
+
+  // The good one is still reachable by number.
+  const response = await fetch(
+    `${BASE}/v1/clubs/${encodeURIComponent(CLUB)}/roster?revision=${first.body.revision}`,
+    { headers: { authorization: `Bearer ${SECRET}` } }
+  );
+  assert.equal(response.status, 200);
+  assert.equal(
+    (await response.json()).roster.payload,
+    good,
+    "an append-only roster must keep every published revision"
+  );
+});
+
+test("the revision list reports author and entry count", async () => {
+  const response = await fetch(`${BASE}/v1/clubs/${CLUB}/roster/revisions`, {
+    headers: { authorization: `Bearer ${SECRET}` },
+  });
+  assert.equal(response.status, 200);
+
+  const { revisions } = await response.json();
+  assert.ok(revisions.length > 0);
+
+  // Newest first, so a picker shows recent revisions without scrolling.
+  assert.ok(
+    revisions[0].revision > revisions[revisions.length - 1].revision,
+    "revisions should be newest first"
+  );
+
+  const entry = revisions[0];
+  assert.equal(typeof entry.author, "string");
+  assert.equal(typeof entry.entry_count, "number");
+  assert.equal(typeof entry.updated_at, "number");
+  assert.ok(!("payload" in entry), "the list must not carry payloads");
+});
+
+test("requesting a roster revision that does not exist returns 404", async () => {
+  const response = await fetch(
+    `${BASE}/v1/clubs/${encodeURIComponent(CLUB)}/roster?revision=999999`,
+    { headers: { authorization: `Bearer ${SECRET}` } }
+  );
+  assert.equal(response.status, 404);
+  assert.equal((await response.json()).error.code, "roster_not_found");
+});
+
+test("a malformed roster revision parameter is rejected", async () => {
+  const response = await fetch(
+    `${BASE}/v1/clubs/${encodeURIComponent(CLUB)}/roster?revision=abc`,
+    { headers: { authorization: `Bearer ${SECRET}` } }
+  );
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).error.code, "invalid_revision");
+});
