@@ -1,6 +1,16 @@
 /**
  * Match Scorekeeper backend.
  *
+ * Copyright (C) 2026 Greg Groiss
+ * Licensed under the GNU Affero General Public License v3.0.
+ * See LICENSE for the full text.
+ *
+ * ... existing description continues ...
+ */
+
+/**
+ * Match Scorekeeper backend.
+ *
  * Cloudflare Worker exposing a small JSON API for uploading squad scores and
  * syncing club rosters. See migrations/ for the database schema.
  *
