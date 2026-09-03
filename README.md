@@ -381,3 +381,14 @@ npx wrangler d1 migrations create match-scorekeeper describe_the_change
 ```
 
 Apply locally, run the tests, then apply to remote.
+
+---
+
+## License
+
+GNU Affero General Public License v3.0. See `LICENSE`.
+
+The AGPL's network clause is the relevant one here: if you modify this and run
+it as a service others use, they are entitled to your modified source. Running
+it unmodified for your own club — which is what this is designed for — carries
+no obligation beyond keeping the license notice.
