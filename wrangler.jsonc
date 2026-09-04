@@ -10,8 +10,8 @@
       "binding": "DB",
 
       "database_name": "match-scorekeeper",
-      "database_id": "23d001ff-c042-4ed5-b645-ea6429649b15",
-
+      "database_id": "PASTE_YOURS_HERE",
+      
       // Folder holding the .sql migration files, applied in order.
       "migrations_dir": "migrations"
     }
