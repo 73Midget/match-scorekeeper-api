@@ -16,13 +16,11 @@
   "license": "ISC",
   "type": "module",
   "devDependencies": {
+    "qrcode": "^1.5.4",
     "wrangler": "^4.127.0"
   },
   "allowScripts": {
     "esbuild@0.28.1": true,
     "workerd@1.20260826.1": true
-  },
-  "dependencies": {
-    "qrcode": "^1.5.4"
   }
 }
