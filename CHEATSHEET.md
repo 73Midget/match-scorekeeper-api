@@ -170,18 +170,34 @@ npx wrangler d1 execute match-scorekeeper --remote --command "SELECT ..."
 -- What clubs exist
 SELECT club_id, display_name, secret_version FROM clubs;
 
--- What has been uploaded
-SELECT match_key, squad_key, device_id, revision, entry_count
+-- Recent uploads, readable timestamps
+SELECT club_id, match_key, squad_key, device_id, revision, entry_count,
+       datetime(uploaded_at/1000, 'unixepoch') AS uploaded
   FROM squad_uploads ORDER BY uploaded_at DESC LIMIT 20;
 
+-- One club only
+SELECT match_key, squad_key, device_id, revision, entry_count
+  FROM squad_uploads WHERE club_id = 'x3222665'
+ ORDER BY uploaded_at DESC LIMIT 20;
+
+-- How much each club has
+SELECT club_id, COUNT(*) AS uploads, COUNT(DISTINCT match_key) AS matches
+  FROM squad_uploads GROUP BY club_id;
+
 -- Roster history
-SELECT revision, author, entry_count, updated_at FROM rosters
- ORDER BY revision DESC;
+SELECT revision, author, entry_count,
+       datetime(updated_at/1000, 'unixepoch') AS updated
+  FROM rosters ORDER BY revision DESC;
 ```
 
 **Rows read counts rows scanned, not returned.** A `SELECT *` on a large table
 counts every row against the daily allowance. Irrelevant at club scale; worth
 knowing the shape.
+
+Timestamps are stored as milliseconds. `datetime(col/1000, 'unixepoch')` renders
+them readably, in UTC — not your local time.
+
+`WHERE club_id = '...'` scopes to one club. Text values need single quotes.
 
 ---
 
