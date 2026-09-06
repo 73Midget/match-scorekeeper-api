@@ -11,6 +11,13 @@ account. Nobody hosts anybody else's data.
 server URL is blank until someone deliberately configures it. If the backend is
 unreachable, or was never set up, matches run exactly as they always have.
 
+## Documentation
+
+- **[SETUP.md](SETUP.md)** — standing up your own backend, step by step. Start here.
+- **[OPERATIONS.md](OPERATIONS.md)** — running your club day to day.
+- **[INTEGRATION.md](INTEGRATION.md)** — the API specification, for app development.
+- **[CHEATSHEET.md](CHEATSHEET.md)** — command reference.
+
 ---
 
 ## What it does
