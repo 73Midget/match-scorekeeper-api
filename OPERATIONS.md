@@ -63,8 +63,12 @@ Same button — **Upload this squad's results**, on each tablet. There is no
 separate end-of-match action.
 
 If a tablet cannot upload, it keeps showing a pending reminder. Do not ignore it
-— that squad is not yet safe. You can retry later from anywhere with signal, or
-fall back to exporting a file as you would have before.
+— that squad is not on the server yet.
+
+**The file is already saved on the tablet.** Every tap writes it locally before
+attempting the upload, so there is nothing extra to export — it is in Downloads.
+You can retry the upload later from anywhere with signal, or copy that file to
+the compiling tablet the way you would have before.
 
 ### Compiling
 
@@ -271,8 +275,9 @@ gone.
 
 **The order matters. Do not skip ahead.**
 
-1. **Every tablet exports its data** to a shared folder or USB stick. All of
-   them. Before anything else happens.
+1. **Every tablet saves its shooter list** — Tools › Save a file… › Shooter list
+   — and copies it to a shared folder or USB stick. All of them. Before anything
+   else happens.
 2. **One tablet combines** all those exports into a single shooter list, still
    using its old configuration.
 3. **Check the result** — right number of shooters, recent additions present.
