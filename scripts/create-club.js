@@ -1,5 +1,5 @@
 ﻿/**
- * Create a club and print its tablet configuration.
+ * Create a club and print its setup code.
  *
  * Usage:
  *   node scripts/create-club.js "Riverside Gun Club"

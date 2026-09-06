@@ -83,7 +83,7 @@ async function main() {
   console.log("    " + club.club_id + "  " + club.display_name);
   console.log("    Database: " + (remote ? "remote (deployed)" : "local (development)"));
   console.log("\n  Every tablet configured for this club will stop working until it");
-  console.log("  is given the new configuration.\n");
+  console.log("  is given the new setup code.\n");
 
   if (!(await confirm(club.club_id))) {
     console.log("\n  Club id did not match. Nothing was changed.\n");
