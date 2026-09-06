@@ -423,8 +423,9 @@ The app checks the code and shows your club's details. **If it shows your club
 name, it worked.** If it shows an error, the code was pasted incompletely — they
 are long and easy to cut short.
 
-**4.** Scroll to the **THIS TABLET** section and fill in **DEVICE NAME** — "Club
-Tablet 1", "Range Tablet", something you would recognise. Tap **SAVE NAMES**.
+**4.** Scroll back up to **THIS TABLET** — the first section in Tools — and fill
+in **DEVICE NAME**: "Club Tablet 1", "Range Tablet", something you would
+recognise. Tap **SAVE NAMES**.
 
 This is how you tell tablets apart later when compiling results, especially if
 two of them end up using the same squad name. The squad name field above it is

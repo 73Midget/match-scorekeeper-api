@@ -10,8 +10,8 @@ If your backend has not been set up yet, start with **SETUP.md**.
 ## The one-minute version
 
 - The app works offline. It always works offline. The backend is a convenience.
-- **Tap backup during a match.** When online is turned on, that also sends the
-  squad to the server. It is what saves your data if a tablet dies.
+- **Tap Upload this squad's results during a match**, as often as you would have
+  saved a backup. It is what protects your data if a tablet dies.
 - **Back up the database monthly.** One command, five minutes, and it is the
   difference between an inconvenience and a disaster.
 - **Never let the setup code out.** It is a key to your club's data.
@@ -36,26 +36,31 @@ merged automatically later.
 
 ### During the match
 
-**No signal needed.** Scoring is entirely local. The tablet is not talking to
-anything.
+**No signal needed for scoring.** The tablet is not talking to anything while you
+score.
 
-**Tap Backup as often as you normally would.** When online is on, this saves
-locally *and* sends the squad to the server.
+On the Results screen there is one button that both saves and uploads. It reads
+**Upload this squad's results** when online is on, and **Save this squad's
+results** when it is off. Either way it writes the file to the tablet first, then
+sends the squad to the server if it can.
+
+**Tap it as often as you would have saved a backup.**
 
 This matters more than it looks. When a shooter checks in and gives their contact
 details, that information exists on **that tablet and nowhere else** until it is
 either uploaded or compiled. If the tablet is dropped, drowned, or dies, those
 details are gone with it.
 
-A backup with signal makes it safe. If a tablet is behaving oddly or the battery
-is low, walk to where there is signal and tap backup.
+An upload with signal makes it safe. If a tablet is behaving oddly or the battery
+is low, walk to where there is signal and tap it.
 
-If there is no signal the local backup still happens. The tablet will show that
-the upload is pending and remind you.
+If there is no signal the local save still happens. The tablet will show that the
+upload is pending and remind you.
 
 ### End of the match
 
-On each tablet, tap **Upload squad**.
+Same button — **Upload this squad's results**, on each tablet. There is no
+separate end-of-match action.
 
 If a tablet cannot upload, it keeps showing a pending reminder. Do not ignore it
 — that squad is not yet safe. You can retry later from anywhere with signal, or
@@ -70,12 +75,15 @@ match — squad name, which tablet, how many shooters, and when.
 system cannot know that but you can. Get its file from the tablet directly and
 add it — the compile screen takes files as well as uploads, in the same list.
 
-Then compile, and publish. Publishing does three things, each reported
-separately:
+Then tap **Compile match results**. That one tap does everything:
 
-1. Sends the updated shooter list
-2. Sends the compiled results as an archive
-3. Checks whether anything arrived late
+1. Merges the squads into the results
+2. Sends the updated shooter list
+3. Sends the compiled results as an archive
+4. Checks whether anything arrived late
+
+There is no separate publish step, and that is deliberate — a second tap is one
+people forget, and forgetting it fails quietly.
 
 ### About that last check
 
@@ -88,6 +96,30 @@ Look at the shooter count and the time. If nothing meaningful changed, ignore it
 If someone was added or a score corrected after you started, you have caught
 something worth compiling again — and you have caught it while everyone is still
 in the room.
+
+### If you correct a score afterwards
+
+Changing a score after compiling is the one case where publishing is a separate
+action. A **Publish corrected results** button appears on the Results screen.
+
+**Tap it.** Without it the correction exists only on that tablet — the results
+already sent to the server are the uncorrected ones, and nothing else will tell
+you they disagree.
+
+### If a squad RO fixes something after the match was compiled
+
+They will upload again from their own tablet, and that upload appears on the
+compile screen flagged **re-uploaded since you compiled**, already unticked.
+
+**Leave it unticked and make the change on the compiling tablet instead.**
+
+Including it does not merge their correction — it replays their entire squad over
+what the compiling tablet already has. Anything fixed on the compiling tablet
+since then gets overwritten, and a shooter can end up listed twice.
+
+The flag only appears for a squad already in the compiled results. A squad that
+has never been compiled is always ticked by default, including a replacement
+tablet's.
 
 ### Next match
 
@@ -105,7 +137,7 @@ screen with the same name.
 The app cannot tell whether these are two different squads that were both called
 "Squad 1", or one squad that moved to a replacement tablet. **You can** — look at
 the shooter names. Different people means two squads, compile both. The same
-people means a replacement, compile only the later one.
+people means a replacement, compile only the complete one.
 
 This is why each tablet has a device name. On the compile screen you will see
 which tablet each one came from, which usually settles it at a glance.
@@ -115,13 +147,14 @@ which tablet each one came from, which usually settles it at a glance.
 If it had uploaded at any point, that upload is on the server and appears on the
 compile screen like any other squad. Pick up from there.
 
-You get whatever was in its **last backup**, not the moment it died. Anything
-scored after that tap is gone. This is the entire reason to tap backup during a
-match rather than only at the end.
+You get whatever was in its **last upload**, not the moment it died. Anything
+scored after that tap is gone. This is the entire reason to upload during a match
+rather than only at the end.
 
 If a spare tablet took over, both the dead tablet's partial squad and the
-replacement's complete squad appear. **Compile only one** — the replacement's,
-which includes everything. Compiling both counts the early shooters twice.
+replacement's complete squad appear, both ticked. **Untick the partial one** —
+the replacement's includes the shooters the first tablet had already scored, so
+compiling both counts those shooters twice.
 
 ---
 
