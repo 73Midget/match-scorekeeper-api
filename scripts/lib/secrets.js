@@ -96,3 +96,43 @@ export function buildConfigBlob(url, clubId, secret) {
     "utf8"
   ).toString("base64");
 }
+
+/**
+ * Print the setup code, optionally as a scannable QR.
+ *
+ * Shared so create-club and rotate-secret cannot drift in how they present a
+ * credential — the wording around it is doing real work.
+ *
+ * The QR is rendered in the terminal rather than saved as an image, and that is
+ * deliberate. An image file exists to be sent somewhere, which is exactly what
+ * a setup code must not be. Terminal output is gone when the window closes.
+ *
+ * qrcode is imported only when asked for, so a failed or skipped install of it
+ * cannot stop a club being created.
+ *
+ * @param {string}  setupCode Base64 configuration for a tablet.
+ * @param {boolean} withQr    Also render a scannable code.
+ */
+export async function printSetupCode(setupCode, withQr) {
+  console.log("  Setup code (paste into the app's Connection screen):\n");
+  console.log("  " + setupCode + "\n");
+  console.log("  This contains the secret. Anyone who has it can upload for this club.\n");
+
+  if (!withQr) {
+    console.log("  Pass --qr to also show a scannable code.\n");
+    return;
+  }
+
+  let QRCode;
+  try {
+    QRCode = (await import("qrcode")).default;
+  } catch {
+    console.log("  Could not load the QR library. Run: npm install qrcode\n");
+    return;
+  }
+
+  console.log("  Scan with the tablet's camera, then paste into the app:\n");
+  console.log(await QRCode.toString(setupCode, { type: "terminal", small: true }));
+  console.log("  Anyone who can see this screen can photograph it. Close the window");
+  console.log("  when the tablets are set up.\n");
+}

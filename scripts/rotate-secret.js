@@ -18,7 +18,12 @@
 
 import { createInterface } from "node:readline/promises";
 import { runSql, sqlQuote } from "./lib/d1.js";
-import { generateSecret, hashSecret, buildConfigBlob } from "./lib/secrets.js";
+import {
+  generateSecret,
+  hashSecret,
+  buildConfigBlob,
+  printSetupCode,
+} from "./lib/secrets.js";
 
 /**
  * Ask the operator to confirm by typing the club id back.
@@ -54,6 +59,7 @@ async function main() {
   const remote = args.includes("--remote");
   const urlIndex = args.indexOf("--url");
   const apiUrl = urlIndex !== -1 ? args[urlIndex + 1] : null;
+  const withQr = args.includes("--qr");
 
   // Look the club up first, so the confirmation prompt can name it and so a
   // mistyped id fails before anything is generated.
@@ -111,11 +117,9 @@ async function main() {
   console.log("\n  Save the secret now. It is not stored anywhere and cannot be recovered.\n");
 
   if (apiUrl) {
-    console.log("  Tablet configuration (paste into the app setup screen):\n");
-    console.log("  " + buildConfigBlob(apiUrl, club.club_id, secret) + "\n");
-    console.log("  This contains the secret. Anyone who has it can upload for this club.\n");
+    await printSetupCode(buildConfigBlob(apiUrl, club.club_id, secret), withQr);
   } else {
-    console.log("  Pass --url <api-url> to also print a pasteable tablet configuration.\n");
+    console.log("  Pass --url <api-url> to also print a setup code for the tablets.\n");
   }
 
   // Confirm by re-reading the row rather than trusting a reported row count.
@@ -134,4 +138,4 @@ async function main() {
   }
 }
 
-main();
+await main();

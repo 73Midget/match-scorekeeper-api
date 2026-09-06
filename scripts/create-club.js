@@ -21,9 +21,10 @@ import {
   generateSecret,
   hashSecret,
   buildConfigBlob,
+  printSetupCode,
 } from "./lib/secrets.js";
 
-function main() {
+async function main() {
   const args = process.argv.slice(2);
 
   const displayName = args.find((a) => !a.startsWith("--"));
@@ -43,6 +44,7 @@ function main() {
   const remote = args.includes("--remote");
   const urlIndex = args.indexOf("--url");
   const apiUrl = urlIndex !== -1 ? args[urlIndex + 1] : null;
+  const withQr = args.includes("--qr");
 
   const clubId = generateClubId();
   const secret = generateSecret();
@@ -74,12 +76,10 @@ function main() {
   console.log("  If it is lost, rotate this club's secret.\n");
 
   if (apiUrl) {
-    console.log("  Tablet configuration (paste into the app setup screen):\n");
-    console.log("  " + buildConfigBlob(apiUrl, clubId, secret) + "\n");
-    console.log("  This contains the secret. Anyone who has it can upload for this club.\n");
+    await printSetupCode(buildConfigBlob(apiUrl, clubId, secret), withQr);
   } else {
-    console.log("  Pass --url <api-url> to also print a pasteable tablet configuration.\n");
+    console.log("  Pass --url <api-url> to also print a setup code for the tablets.\n");
   }
 }
 
-main();
+await main();
