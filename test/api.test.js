@@ -108,6 +108,29 @@ async function getRoster(secret = SECRET, club = CLUB) {
 }
 
 /**
+ * POST a standalone mark-merged request.
+ *
+ * @param {object[]} mergedSquads
+ * @param {string}   secret
+ * @param {string}   club
+ * @returns {Promise<{ status: number, body: any }>}
+ */
+async function markMerged(mergedSquads, secret = SECRET, club = CLUB) {
+  const response = await fetch(
+    `${BASE}/v1/clubs/${encodeURIComponent(club)}/squads/merged`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${secret}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ merged_squads: mergedSquads }),
+    }
+  );
+  return { status: response.status, body: await response.json() };
+}
+
+/**
  * PUT a compiled roster.
  *
  * @param {object} push   Body to send, including base_revision.
@@ -700,4 +723,115 @@ test("a malformed roster revision parameter is rejected", async () => {
   );
   assert.equal(response.status, 400);
   assert.equal((await response.json()).error.code, "invalid_revision");
+});
+
+test("marking squads merged requires a valid secret", async () => {
+  const { status } = await markMerged(
+    [{ match_key: "any", device_id: "any", revision: 1 }],
+    "not-the-secret"
+  );
+  assert.equal(status, 401);
+});
+
+test("marking squads merged rejects an empty list", async () => {
+  const { status, body } = await markMerged([]);
+  assert.equal(status, 400);
+  assert.match(body.error.message, /merged_squads/);
+});
+
+test("marking a squad merged records the current roster revision", async () => {
+  const matchKey = `outdoor|test-mark-${Date.now()}`;
+  const deviceId = `device-${Date.now()}`;
+
+  const upload = await uploadSquad(envelope({ match_key: matchKey, device_id: deviceId }));
+  assert.equal(upload.status, 201);
+
+  // Needs a roster to mark against — this is the skip case, which only makes
+  // sense when a list already exists.
+  const before = await getRoster();
+  const baseRevision = before.status === 200 ? before.body.roster.revision : null;
+  const push = await putRoster({
+    payload: JSON.stringify({ entries: [{ name: "A" }], stamp: Date.now() }),
+    schema_version: 1,
+    base_revision: baseRevision,
+    entry_count: 1,
+    author: "tablet-a",
+  });
+  assert.equal(push.status, 201);
+
+  const { status, body } = await markMerged([
+    { match_key: matchKey, device_id: deviceId, revision: upload.body.revision },
+  ]);
+
+  assert.equal(status, 200);
+  assert.equal(body.marked_squads, 1);
+  assert.equal(body.roster_revision, push.body.revision);
+  assert.deepEqual(body.unmatched, []);
+
+  // No longer outstanding.
+  const unmerged = await fetch(
+    `${BASE}/v1/clubs/${encodeURIComponent(CLUB)}/squads/unmerged`,
+    { headers: { authorization: `Bearer ${SECRET}` } }
+  );
+  const list = (await unmerged.json()).unmerged;
+  assert.ok(
+    !list.some((s) => s.device_id === deviceId && s.match_key === matchKey),
+    "a marked squad must drop off the unmerged list"
+  );
+});
+
+test("marking the same squads twice changes nothing", async () => {
+  // The publish retry resumes rather than restarts, so a mark can arrive twice
+  // with identical triples. It must not re-attribute or fail.
+  const matchKey = `outdoor|test-mark-twice-${Date.now()}`;
+  const deviceId = `device-${Date.now()}`;
+
+  const upload = await uploadSquad(envelope({ match_key: matchKey, device_id: deviceId }));
+
+  const before = await getRoster();
+  await putRoster({
+    payload: JSON.stringify({ entries: [{ name: "A" }], stamp: Date.now() }),
+    schema_version: 1,
+    base_revision: before.status === 200 ? before.body.roster.revision : null,
+    entry_count: 1,
+    author: "tablet-a",
+  });
+
+  const triples = [
+    { match_key: matchKey, device_id: deviceId, revision: upload.body.revision },
+  ];
+
+  const first = await markMerged(triples);
+  assert.equal(first.body.marked_squads, 1);
+
+  const second = await markMerged(triples);
+  assert.equal(second.status, 200, "a repeated mark is not an error");
+  assert.equal(second.body.marked_squads, 1, "already-marked squads still count as marked");
+  assert.deepEqual(second.body.unmatched, []);
+});
+
+test("a triple matching nothing is reported, not rejected", async () => {
+  const matchKey = `outdoor|test-mark-miss-${Date.now()}`;
+  const deviceId = `device-${Date.now()}`;
+
+  const upload = await uploadSquad(envelope({ match_key: matchKey, device_id: deviceId }));
+
+  const before = await getRoster();
+  await putRoster({
+    payload: JSON.stringify({ entries: [{ name: "A" }], stamp: Date.now() }),
+    schema_version: 1,
+    base_revision: before.status === 200 ? before.body.roster.revision : null,
+    entry_count: 1,
+    author: "tablet-a",
+  });
+
+  const { status, body } = await markMerged([
+    { match_key: matchKey, device_id: deviceId, revision: upload.body.revision },
+    { match_key: matchKey, device_id: deviceId, revision: 999 },
+  ]);
+
+  assert.equal(status, 200);
+  assert.equal(body.marked_squads, 1);
+  assert.equal(body.unmatched.length, 1);
+  assert.equal(body.unmatched[0].revision, 999);
 });

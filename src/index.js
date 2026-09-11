@@ -312,6 +312,15 @@ function validateRosterPush(body) {
   if (!Array.isArray(mergedSquads)) {
     return { ok: false, message: 'Field "merged_squads" must be an array' };
   }
+  
+  // The result read-back binds three parameters per entry against D1's limit
+  // of 100. A match with 25 squads is already implausible, so this cannot bite
+  // in practice — but an uncapped request would fail with a confusing database
+  // error instead of a clear one. Clients split into sequential batches of 25.
+  if (mergedSquads.length > 25) {
+    return { ok: false, message: 'Field "merged_squads" may contain at most 25 entries' };
+  }
+
   for (const entry of mergedSquads) {
     if (
       typeof entry !== "object" ||
@@ -340,6 +349,104 @@ function validateRosterPush(body) {
       author: typeof body.author === "string" ? body.author : "",
     },
   };
+}
+
+/**
+ * Validate a standalone mark-merged request.
+ *
+ * The same triples a roster push carries, without a payload. Kept separate from
+ * validateRosterPush because the two requests have genuinely different
+ * semantics: a roster push is conditional on base_revision and can conflict,
+ * while marking squads is idempotent and order-independent.
+ *
+ * @param {unknown} body
+ * @returns {{ ok: true, value: object[] } | { ok: false, message: string }}
+ */
+function validateMergedSquads(body) {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return { ok: false, message: "Body must be a JSON object" };
+  }
+
+  const mergedSquads = body.merged_squads;
+  if (!Array.isArray(mergedSquads) || mergedSquads.length === 0) {
+    return { ok: false, message: 'Field "merged_squads" must be a non-empty array' };
+  }
+
+  // D1 allows 100 bound parameters per query and the lookup below uses three
+  // per entry. A match with 25 squads is already implausible, so this cannot
+  // bite in practice — but an uncapped request would fail with a confusing
+  // database error instead of a clear one.
+  if (mergedSquads.length > 25) {
+    return { ok: false, message: 'Field "merged_squads" may contain at most 25 entries' };
+  }
+
+  for (const entry of mergedSquads) {
+    if (
+      typeof entry !== "object" ||
+      entry === null ||
+      typeof entry.match_key !== "string" ||
+      typeof entry.device_id !== "string" ||
+      !Number.isInteger(entry.revision)
+    ) {
+      return {
+        ok: false,
+        message: "Each merged_squads entry needs match_key, device_id, and revision",
+      };
+    }
+  }
+
+  return { ok: true, value: mergedSquads };
+}
+
+/**
+ * Report which of the given triples are now marked as merged.
+ *
+ * Reads the outcome back rather than counting what a batch reported. The local
+ * emulator returns meta without a `changes` field while the deployed database
+ * includes one, so a count taken from batch metadata reads zero locally even on
+ * success.
+ *
+ * That is not merely a testing annoyance. A client trusting the count would
+ * report "0 of 3 squads were marked" after a successful publish against a local
+ * server, and the obvious remedy for whoever sees that — re-selecting squads on
+ * the compile screen — is the one action that produces duplicate shooters. A
+ * false alarm whose natural fix causes a real problem.
+ *
+ * So this query is not redundant. Removing it reintroduces that.
+ *
+ * @param {object}   env
+ * @param {string}   clubId
+ * @param {object[]} entries {match_key, device_id, revision} triples, max 25.
+ * @returns {Promise<{ markedSquads: number, unmatched: object[] }>}
+ */
+async function markedSquadResult(env, clubId, entries) {
+  const conditions = entries
+    .map((_, i) => `(match_key = ?${i * 3 + 2} AND device_id = ?${i * 3 + 3} AND revision = ?${i * 3 + 4})`)
+    .join(" OR ");
+
+  const lookup = await env.DB.prepare(
+    `SELECT match_key, device_id, revision, merged_into_roster_revision
+       FROM squad_uploads
+      WHERE club_id = ?1 AND (${conditions})`
+  )
+    .bind(clubId, ...entries.flatMap((e) => [e.match_key, e.device_id, e.revision]))
+    .all();
+
+  // Null bytes cannot appear in any of these values, so they are safe as a
+  // separator that no legitimate key can contain.
+  const key = (m, d, r) => `${m}\u0000${d}\u0000${r}`;
+
+  const marked = new Set(
+    lookup.results
+      .filter((row) => row.merged_into_roster_revision !== null)
+      .map((row) => key(row.match_key, row.device_id, row.revision))
+  );
+
+  const unmatched = entries.filter(
+    (e) => !marked.has(key(e.match_key, e.device_id, e.revision))
+  );
+
+  return { markedSquads: entries.length - unmatched.length, unmatched };
 }
 
 export default {
@@ -398,6 +505,88 @@ export default {
         club: clubId,
         club_name: club?.display_name ?? "",
       });    }
+
+    // Mark squad uploads as absorbed without publishing a roster.
+    //
+    // Clubs shoot the same people week to week, so most compiles change nothing
+    // about the shooter list. Publishing an identical roster every week buries
+    // the revisions that matter, and finding the good list after a bad one goes
+    // out is the entire point of keeping roster history.
+    //
+    // Skipping the push is also safer than making it: if this tablet's list is
+    // unchanged but another has since added someone — or rolled back — pushing
+    // would replace the club list with this tablet's lesser copy. Skipping
+    // cannot.
+    //
+    // But the squads still have to be marked, or the unmerged list flags them
+    // forever. Hence a separate call: the roster push keeps meaning exactly one
+    // thing, and a failed mark is retried on its own rather than by repeating a
+    // whole compile.
+    const markMergedRoute = /^\/v1\/clubs\/([^/]+)\/squads\/merged$/.exec(path);
+    if (markMergedRoute && request.method === "POST") {
+      const clubId = decodeURIComponent(markMergedRoute[1]);
+
+      const auth = await authenticateClub(request, env, clubId);
+      if (!auth.ok) return auth.response;
+
+      const parsed = await readJsonBody(request);
+      if (!parsed.ok) return parsed.response;
+
+      const validated = validateMergedSquads(parsed.value);
+      if (!validated.ok) return error(400, "invalid_body", validated.message);
+
+      const entries = validated.value;
+
+      const current = await env.DB.prepare(
+        "SELECT revision FROM rosters WHERE club_id = ?1 ORDER BY revision DESC LIMIT 1"
+      )
+        .bind(clubId)
+        .first();
+
+      // A caller cannot have concluded "unchanged" with nothing to compare
+      // against, so reaching this with no roster means a client bug. Marking
+      // squads against a revision that does not exist would be a lie.
+      if (!current) {
+        return error(
+          404,
+          "roster_not_found",
+          "This club has no roster; publish one rather than marking squads against it"
+        );
+      }
+
+      // The squads are recorded against the revision that already contains
+      // their shooters, which is why the push was skipped. Expect to see squads
+      // marked with a revision whose timestamp predates their own upload: it
+      // means "these people were already on the list", and it is correct.
+      //
+      // The IS NULL guard makes this idempotent — a repeated call from a
+      // resumed publish changes nothing and leaves the original attribution
+      // intact.
+      await env.DB.batch(
+        entries.map((entry) =>
+          env.DB.prepare(
+            `UPDATE squad_uploads
+                SET merged_into_roster_revision = ?1
+              WHERE club_id = ?2 AND match_key = ?3 AND device_id = ?4
+                AND revision = ?5
+                AND merged_into_roster_revision IS NULL`
+          ).bind(current.revision, clubId, entry.match_key, entry.device_id, entry.revision)
+        )
+      );
+
+      // Anything not now marked either does not exist or was superseded. Both
+      // are real outcomes rather than errors: the caller asked about a revision
+      // that is no longer the one to record, and the RO can act on knowing
+      // which.
+      const { markedSquads, unmatched } = await markedSquadResult(env, clubId, entries);
+
+      return json({
+        ok: true,
+        roster_revision: current.revision,
+        marked_squads: markedSquads,
+        unmatched,
+      });
+    }      
 
         // Squads that no roster push has absorbed yet.
     //
@@ -957,27 +1146,33 @@ export default {
       // pending on the compile screen. Better a false "not yet merged" than a
       // rejected push whose roster actually landed.
       let markedSquads = 0;
-      if (push.merged_squads.length > 0) {
-        const statements = push.merged_squads.map((entry) =>
-          env.DB.prepare(
-            `UPDATE squad_uploads
-                SET merged_into_roster_revision = ?1
-              WHERE club_id = ?2 AND match_key = ?3 AND device_id = ?4
-                AND revision = ?5
-                AND merged_into_roster_revision IS NULL`
-          ).bind(revision, clubId, entry.match_key, entry.device_id, entry.revision)
-        );
+      let unmatched = [];
 
+      if (push.merged_squads.length > 0) {
         try {
-          const results = await env.DB.batch(statements);
-          markedSquads = results.reduce((sum, r) => sum + (r.meta?.changes ?? 0), 0);
+          await env.DB.batch(
+            push.merged_squads.map((entry) =>
+              env.DB.prepare(
+                `UPDATE squad_uploads
+                    SET merged_into_roster_revision = ?1
+                  WHERE club_id = ?2 AND match_key = ?3 AND device_id = ?4
+                    AND revision = ?5
+                    AND merged_into_roster_revision IS NULL`
+              ).bind(revision, clubId, entry.match_key, entry.device_id, entry.revision)
+            )
+          );
+
+          const result = await markedSquadResult(env, clubId, push.merged_squads);
+          markedSquads = result.markedSquads;
+          unmatched = result.unmatched;
         } catch {
           markedSquads = 0;
+          unmatched = push.merged_squads;
         }
       }
 
       return json(
-        { ok: true, revision, updated_at: updatedAt, marked_squads: markedSquads },
+        { ok: true, revision, updated_at: updatedAt, marked_squads: markedSquads, unmatched },
         201
       );
     }
