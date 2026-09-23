@@ -1,12 +1,13 @@
 # Match Scorekeeper Backend — Client Integration Specification
 
-Spec version 1.3, describing backend release v1.1.0.
+Spec version 1.3.1, describing backend release v1.1.0.
 
 Two version numbers, tracking different things: the spec is versioned by its own
 revisions, the backend by its releases, and they are not expected to match. This
 line says which spec revision describes which release.
 
-Implemented by app 2.1.1, build 2026-09-06-e.
+Implemented by app 2.1.1, build 2026-09-06-e. The `noClub` fingerprint field
+(§4.7) arrived in app 2.3.0.
 
 The backend is built, deployed, and tested. This specifies what the PWA must do
 to talk to it, and the client-side behaviour the backend assumes.
@@ -561,7 +562,7 @@ The set of people, **sorted by `personId`**, each contributing:
 | `phone` | `squad` |
 | `category` | `type` |
 | RO flag | `checkinSeq` |
-| | `idAt` |
+| `noClub` | `idAt` |
 
 Rules, all of which matter:
 
@@ -579,6 +580,20 @@ Rules, all of which matter:
   reconciliation, so it looks like it should count — but it moves whenever
   `updatePerson` runs, including with identical values. Including it would break
   the skip on exactly the no-op edit this feature exists for.
+- **`noClub` is an identity fact, not a match setting.** It means "email scores
+  only" — the shooter still receives their own results, but is left out of the
+  club contact list used for announcements. It travels with the person between
+  tablets, so it belongs with `email` and `phone` rather than with `division`.
+  Without it in the fingerprint, ticking the box changes nothing the client
+  compares, the list never publishes, and other tablets keep emailing that
+  person. Added in app 2.3.0.
+
+**Mixed app versions during a rollout.** A tablet on an older build computes the
+fingerprint without a field that build does not know about, so a change to only
+that field compares equal and the push is skipped. That is harmless: the value is
+still in the payload the tablet holds, merging copies whole entry objects rather
+than filtering to known fields, and the next publish from an updated tablet
+carries it up. Verified against 2.1.1 for `noClub`.
 
 **This list is a contract, not an implementation detail.** If a future version
 adds an identity field — a membership number, say — and the fingerprint is not
