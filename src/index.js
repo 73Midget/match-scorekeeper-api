@@ -5,10 +5,7 @@
  * Licensed under the GNU Affero General Public License v3.0.
  * See LICENSE for the full text.
  *
- * ... existing description continues ...
- */
-
-/**
+ * /**
  * Match Scorekeeper backend.
  *
  * Cloudflare Worker exposing a small JSON API for uploading squad scores and
@@ -880,6 +877,76 @@ export default {
         squads: result.results,
       });
     }
+
+    // ---------------------------------------------------------------------
+    // List one device's revisions at a match, newest first.
+    //
+    // ?revision= on the download below can already reach a specific revision,
+    // but nothing said which revisions exist — so a client wanting to compare
+    // a bad upload against the good one before it had to guess numbers and
+    // read the 404s.
+    //
+    // Payloads are excluded, as with the roster revision list: this answers
+    // "what exists", and a client choosing between two revisions should not
+    // have to download both to render the choice.
+    //
+    // Expect a single entry for an older match, and treat that as a normal
+    // answer rather than a truncated one. Pruning keeps only a device's newest
+    // revision once a compile has absorbed the squad, so a long history exists
+    // during a match and for as long as the club's retention window, not
+    // indefinitely.
+    // ---------------------------------------------------------------------
+    const squadRevisionsRoute =
+      /^\/v1\/clubs\/([^/]+)\/matches\/([^/]+)\/squads\/([^/]+)\/revisions$/.exec(path);
+    if (squadRevisionsRoute && request.method === "GET") {
+      const clubId = decodeURIComponent(squadRevisionsRoute[1]);
+      const matchKey = decodeURIComponent(squadRevisionsRoute[2]);
+      const deviceId = decodeURIComponent(squadRevisionsRoute[3]);
+
+      const auth = await authenticateClub(request, env, clubId);
+      if (!auth.ok) return auth.response;
+
+      // No time window and no meaningful growth to bound. This list is as long
+      // as the number of times one device uploaded at one match, which is
+      // bounded by squad size — unlike the match and unmerged lists, which
+      // grow with every match a club ever runs.
+      //
+      // squad_label and device_label are per-revision rather than per-device:
+      // an RO who renames a squad mid-match leaves revisions under two names,
+      // and seeing that is the explanation for a history that otherwise looks
+      // wrong.
+      const result = await env.DB.prepare(
+        `SELECT revision, squad_key, squad_label, device_label,
+                entry_count, schema_version, app_version, app_build,
+                content_hash, uploaded_at, merged_into_roster_revision
+           FROM squad_uploads
+          WHERE club_id = ?1 AND match_key = ?2 AND device_id = ?3
+          ORDER BY revision DESC
+          LIMIT 200`
+      )
+        .bind(clubId, matchKey, deviceId)
+        .all();
+
+      // 404 rather than an empty list, matching the single-revision download.
+      // A device cannot have zero revisions, so an empty result means this
+      // device never uploaded at this match — a different answer from "it
+      // uploaded nothing", and one a client should be able to tell apart.
+      if (result.results.length === 0) {
+        return error(
+          404,
+          "squad_not_found",
+          "No uploads found for that club, match, and device"
+        );
+      }
+
+      return json({
+        ok: true,
+        club: clubId,
+        match_key: matchKey,
+        device_id: deviceId,
+        revisions: result.results,
+      });
+    }    
 
     // ---------------------------------------------------------------------
     // Download one device's payload for a match.

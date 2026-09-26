@@ -1,16 +1,18 @@
 {
   "name": "match-scorekeeper-api",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Backend API for Match Scorekeeper — Cloudflare Worker + D1",
   "main": "src/index.js",
   "scripts": {
     "check": "node --check src/index.js",
     "dev": "wrangler dev",
     "migrate:local": "wrangler d1 migrations apply match-scorekeeper --local",
-    "test": "node --test \"test/**/*.test.js\"",
+    "test": "node --test test/api.test.js",
+    "test:prune": "node --test test/prune.test.js",
     "create-club": "node scripts/create-club.js",
     "backup": "node scripts/export-backup.js --remote --out backups"
   },
+
   "keywords": [],
   "author": "",
   "license": "ISC",

@@ -94,6 +94,27 @@ async function getSquad(matchKey, deviceId, revision = null, secret = SECRET, cl
 }
 
 /**
+ * GET the revision list for one device's squad at a match.
+ *
+ * @param {string} matchKey
+ * @param {string} deviceId
+ * @param {string} secret
+ * @param {string} club
+ * @returns {Promise<{ status: number, body: any }>}
+ */
+async function getSquadRevisions(matchKey, deviceId, secret = SECRET, club = CLUB) {
+  const url =
+    `${BASE}/v1/clubs/${encodeURIComponent(club)}` +
+    `/matches/${encodeURIComponent(matchKey)}` +
+    `/squads/${encodeURIComponent(deviceId)}/revisions`;
+
+  const response = await fetch(url, {
+    headers: { authorization: `Bearer ${secret}` },
+  });
+  return { status: response.status, body: await response.json() };
+}
+
+/**
  * GET the club's current roster.
  *
  * @param {string} secret
@@ -858,5 +879,199 @@ test("a compiled archive never appears on the unmerged list", async () => {
   assert.ok(
     !unmerged.some((s) => s.match_key === matchKey && s.device_id === "compiled"),
     "a compiled archive is a result, not a squad awaiting compilation"
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Squad revision list (§4.14)
+// ---------------------------------------------------------------------------
+
+test("squad revisions list every revision, newest first", async () => {
+  const first = envelope();
+  const { match_key: matchKey, device_id: deviceId } = first;
+
+  assert.equal((await uploadSquad(first)).status, 201);
+
+  // A second and third revision, each with a different payload so they are not
+  // deduplicated by content hash.
+  for (const nonce of [2, 3]) {
+    const next = envelope({
+      match_key: matchKey,
+      device_id: deviceId,
+      payload: JSON.stringify({ test: true, nonce }),
+    });
+    assert.equal((await uploadSquad(next)).status, 201);
+  }
+
+  const { status, body } = await getSquadRevisions(matchKey, deviceId);
+
+  assert.equal(status, 200);
+  assert.equal(body.ok, true);
+  assert.equal(body.match_key, matchKey);
+  assert.equal(body.device_id, deviceId);
+
+  assert.deepEqual(
+    body.revisions.map((r) => r.revision),
+    [3, 2, 1],
+    "newest first, matching the roster revision list"
+  );
+});
+
+test("squad revisions carry metadata but never a payload", async () => {
+  const first = envelope();
+  assert.equal((await uploadSquad(first)).status, 201);
+
+  const { body } = await getSquadRevisions(first.match_key, first.device_id);
+  const [newest] = body.revisions;
+
+  // A client choosing between two revisions should be able to render the choice
+  // without downloading both payloads.
+  assert.equal(newest.entry_count, first.entry_count);
+  assert.equal(newest.app_version, first.app_version);
+  assert.equal(typeof newest.content_hash, "string");
+  assert.equal(typeof newest.uploaded_at, "number");
+  assert.equal(newest.merged_into_roster_revision, null);
+
+  assert.equal(
+    newest.payload,
+    undefined,
+    "payloads are excluded; this endpoint answers what exists"
+  );
+});
+
+test("squad revisions record a label changed mid-match", async () => {
+  const first = envelope({ squad_label: "1" });
+  assert.equal((await uploadSquad(first)).status, 201);
+
+  // An RO renaming a squad partway through leaves revisions under two names.
+  // Reporting the label per revision is what explains a history that otherwise
+  // looks wrong.
+  const renamed = envelope({
+    match_key: first.match_key,
+    device_id: first.device_id,
+    squad_label: "1A",
+    payload: JSON.stringify({ test: true, nonce: 2 }),
+  });
+  assert.equal((await uploadSquad(renamed)).status, 201);
+
+  const { body } = await getSquadRevisions(first.match_key, first.device_id);
+
+  assert.deepEqual(
+    body.revisions.map((r) => r.squad_label),
+    ["1A", "1"]
+  );
+});
+
+test("squad revisions reflect a mark as merged", async () => {
+  const first = envelope();
+  assert.equal((await uploadSquad(first)).status, 201);
+
+  const roster = await getRoster();
+
+  // Marking needs a roster. A fresh database has none, so create one rather
+  // than failing obscurely inside the mark call.
+  if (roster.status === 404) {
+    const created = await putRoster({
+      payload: JSON.stringify({ entries: [] }),
+      schema_version: 1,
+      base_revision: null,
+      entry_count: 0,
+      author: "api test",
+    });
+    assert.equal(created.status, 201);
+  }
+
+  const marked = await markMerged([
+    { match_key: first.match_key, device_id: first.device_id, revision: 1 },
+  ]);
+  assert.equal(marked.status, 200);
+  assert.equal(marked.body.marked_squads, 1);
+
+  const { body } = await getSquadRevisions(first.match_key, first.device_id);
+
+  assert.equal(
+    body.revisions[0].merged_into_roster_revision,
+    marked.body.roster_revision,
+    "the list should show which roster revision absorbed this upload"
+  );
+});
+
+test("squad revisions 404 for a device that never uploaded", async () => {
+  const first = envelope();
+  assert.equal((await uploadSquad(first)).status, 201);
+
+  const { status, body } = await getSquadRevisions(
+    first.match_key,
+    "device-that-does-not-exist"
+  );
+
+  // 404 rather than an empty list, matching the single-revision download. A
+  // device cannot have zero revisions, so an empty result would be ambiguous.
+  assert.equal(status, 404);
+  assert.equal(body.error.code, "squad_not_found");
+});
+
+test("squad revisions 404 for a match that does not exist", async () => {
+  const { status, body } = await getSquadRevisions(
+    "outdoor|match-that-does-not-exist",
+    "any-device"
+  );
+
+  assert.equal(status, 404);
+  assert.equal(body.error.code, "squad_not_found");
+});
+
+test("squad revisions reject a bad secret", async () => {
+  const first = envelope();
+  assert.equal((await uploadSquad(first)).status, 201);
+
+  const { status, body } = await getSquadRevisions(
+    first.match_key,
+    first.device_id,
+    "not-the-secret"
+  );
+
+  assert.equal(status, 401);
+  assert.equal(body.error.code, "unauthorized");
+});
+
+test("squad revisions are scoped to one club", async () => {
+  const first = envelope();
+  assert.equal((await uploadSquad(first)).status, 201);
+
+  // A valid secret against the wrong club id must not reach another club's
+  // uploads. 401 rather than 404: the secret does not authenticate there.
+  const { status } = await getSquadRevisions(
+    first.match_key,
+    first.device_id,
+    SECRET,
+    "some-other-club"
+  );
+
+  assert.equal(status, 401);
+});
+
+test("squad revisions do not collide with the squad download route", async () => {
+  const first = envelope();
+  assert.equal((await uploadSquad(first)).status, 201);
+
+  // The download route's path ends in a device id. A device literally named
+  // "revisions" must still be downloadable, and the revisions list must not be
+  // served in its place.
+  const named = envelope({
+    match_key: first.match_key,
+    device_id: "revisions",
+    payload: JSON.stringify({ test: true, nonce: 9 }),
+  });
+  assert.equal((await uploadSquad(named)).status, 201);
+
+  const download = await getSquad(first.match_key, "revisions");
+
+  assert.equal(download.status, 200);
+  assert.equal(download.body.squad.device_id, "revisions");
+  assert.equal(
+    typeof download.body.squad.payload,
+    "string",
+    "this is the download route, so it must return a payload"
   );
 });

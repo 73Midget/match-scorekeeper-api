@@ -14,17 +14,39 @@
  * shooter's name, email and phone, and they accumulate in the monthly backup
  * file forever.
  *
- * The compiled archive holds the same people and the same scores in one
- * payload rather than 150, so pruning the raw squads loses nothing a club
- * needs while removing almost all of the personal data.
+ * A squad's newest revision holds the whole squad; the 29 before it are
+ * prefixes of it. So dropping the intermediates loses nothing a club needs
+ * while removing almost all of the stored personal data.
  *
  * WHAT IT WILL NOT TOUCH
  *
  *   - The compiled archive of any match. That is the record of what happened.
- *   - Any upload no roster push absorbed. Until a compile folds a squad in,
- *     a shooter added at check-in on that tablet exists in that payload and
- *     nowhere else. Deleting it would destroy the only copy of their details.
- *     Use delete-match.js if you have looked at one and decided it is junk.
+ *
+ *   - The newest revision any device uploaded. The app reads a squad back by
+ *     device, so deleting a device's last revision would leave a match that
+ *     still appears in the match list but cannot be opened. Keeping it costs
+ *     one row per squad and no privacy: that squad's shooters are already in
+ *     the roster and the compiled archive, both kept indefinitely.
+ *
+ *   - Every revision of a squad no roster push ever absorbed. Until a compile
+ *     folds a squad in, a shooter added at check-in on that tablet may exist
+ *     in those payloads and nowhere else. Use delete-match.js if you have
+ *     looked at one and decided it is junk.
+ *
+ * READ THIS BEFORE CHANGING THE QUERIES
+ *
+ * merged_into_roster_revision is set on ONE revision per device: the revision
+ * the compile actually absorbed. It does not mean "this match was compiled" —
+ * it means "this exact row is the one the roster took".
+ *
+ * The first version of this script tested that column per row, which selected
+ * precisely the newest revision of each device and nothing else. It therefore
+ * deleted the only revision the app can still read and kept all 29 redundant
+ * ones — the exact inverse of the intent, and it reported success doing it.
+ *
+ * So the absorbed check is per DEVICE (does any revision of this device's
+ * squad carry the mark?) and the age and newest-revision checks are per row.
+ * Getting that distinction wrong is silent in both directions.
  *
  * Dry run unless --confirm. Deleting is not reversible and D1's free plan has
  * no point-in-time recovery, so the default is to show and stop.
@@ -42,6 +64,38 @@ const DEFAULT_DAYS = 90;
 
 /** Where export-backup.js writes by default. */
 const BACKUP_DIR = "backups";
+
+/**
+ * SQL: has any revision of this row's squad been absorbed by a roster push?
+ *
+ * Correlated on club, match and device — deliberately NOT on revision. See the
+ * note at the top of this file: the mark lands on one revision per device, so
+ * testing it per row inverts the intent of the whole script.
+ *
+ * Defined once and used by both the eligibility query and the delete, because
+ * the two disagreeing is a bug that shows up as "the dry run lied".
+ */
+const SQUAD_WAS_ABSORBED = `EXISTS (
+        SELECT 1 FROM squad_uploads m
+         WHERE m.club_id = squad_uploads.club_id
+           AND m.match_key = squad_uploads.match_key
+           AND m.device_id = squad_uploads.device_id
+           AND m.merged_into_roster_revision IS NOT NULL
+      )`;
+
+/**
+ * SQL: is this row below its device's newest revision at this match?
+ *
+ * Safe to self-reference the table a DELETE is removing from, because the MAX
+ * row is never itself a delete candidate — so the maximum cannot shift while
+ * the statement runs.
+ */
+const NOT_NEWEST_REVISION = `revision < (
+        SELECT MAX(revision) FROM squad_uploads n
+         WHERE n.club_id = squad_uploads.club_id
+           AND n.match_key = squad_uploads.match_key
+           AND n.device_id = squad_uploads.device_id
+      )`;
 
 /**
  * Warn if no backup has been taken recently.
@@ -76,12 +130,12 @@ function backupWarning() {
 /**
  * Rows eligible for deletion, with enough context to report them per match.
  *
- * The two exclusions are the safety rules, expressed in SQL rather than in
- * code that could take a different branch: nothing that a roster never
- * absorbed, and never the compiled archive.
+ * The three safety rules are expressed in SQL rather than in code that could
+ * take a different branch: never the compiled archive, never a device's newest
+ * revision, and nothing belonging to a squad no roster push ever absorbed.
  *
  * @param {string|null} clubId
- * @param {number}      cutoff Epoch ms; uploads older than this are eligible.
+ * @param {number}      cutoff Epoch ms; revisions older than this are eligible.
  * @param {boolean}     remote
  * @returns {object[]}
  */
@@ -95,11 +149,11 @@ function fetchEligible(clubId, cutoff, remote) {
             MAX(uploaded_at) AS newest,
             COUNT(DISTINCT device_id) AS device_count,
 
-            -- Reported so a match about to lose its raw squads while having no
-            -- compiled archive is visible. That is legal — a roster push
-            -- absorbed the squads, the archive upload failed or was never
-            -- made — but it means pruning leaves no record of the match at
-            -- all, which someone should see before confirming.
+            -- Reported so a match losing its intermediate revisions while
+            -- having no compiled archive is visible. That is legal — a roster
+            -- push absorbed the squads, the archive upload failed or was never
+            -- made — but it means all that will remain is the newest upload
+            -- per squad, with no compiled results beside it.
             EXISTS (
               SELECT 1 FROM squad_uploads c
                WHERE c.club_id = squad_uploads.club_id
@@ -109,8 +163,9 @@ function fetchEligible(clubId, cutoff, remote) {
 
        FROM squad_uploads
       WHERE device_id <> ${sqlQuote(COMPILED_DEVICE)}
-        AND merged_into_roster_revision IS NOT NULL
         AND uploaded_at < ${cutoff}${clubFilter}
+        AND ${NOT_NEWEST_REVISION}
+        AND ${SQUAD_WAS_ABSORBED}
       GROUP BY club_id, match_key
       ORDER BY newest DESC;`,
     remote
@@ -118,11 +173,16 @@ function fetchEligible(clubId, cutoff, remote) {
 }
 
 /**
- * Count uploads the age filter would have caught but the safety rules spared.
+ * Uploads old enough to prune but belonging to squads nothing ever absorbed.
  *
  * Reported rather than silently skipped: "3 matches were left alone because
  * nothing ever compiled them" is a prompt to go and look, and the whole reason
  * list-unmerged.js exists.
+ *
+ * Note the NOT: this is the exact complement of the absorbed check used above,
+ * so a squad appears in one list or the other and never in both. Written as the
+ * negation of the same fragment rather than as its own condition, because two
+ * hand-written opposites drift and a squad could end up in neither.
  *
  * @param {string|null} clubId
  * @param {number}      cutoff
@@ -133,11 +193,12 @@ function fetchSpared(clubId, cutoff, remote) {
   const clubFilter = clubId ? ` AND club_id = ${sqlQuote(clubId)}` : "";
 
   return runSql(
-    `SELECT club_id, match_key, match_label, COUNT(*) AS row_count
+    `SELECT club_id, match_key, match_label, COUNT(*) AS row_count,
+            COUNT(DISTINCT device_id) AS device_count
        FROM squad_uploads
       WHERE device_id <> ${sqlQuote(COMPILED_DEVICE)}
-        AND merged_into_roster_revision IS NULL
         AND uploaded_at < ${cutoff}${clubFilter}
+        AND NOT ${SQUAD_WAS_ABSORBED}
       GROUP BY club_id, match_key
       ORDER BY MAX(uploaded_at) DESC;`,
     remote
@@ -226,8 +287,8 @@ async function main() {
 
   const totalRows = eligible.reduce((sum, m) => sum + Number(m.row_count), 0);
 
-  console.log("\n  Pruning raw squad uploads — " + where + " database");
-  console.log("  Compiled before " + formatDate(cutoff) + " (" + days + " days ago)");
+  console.log("\n  Pruning superseded squad revisions — " + where + " database");
+  console.log("  Uploaded before " + formatDate(cutoff) + " (" + days + " days ago)");
   if (clubId) console.log("  Club: " + clubId);
   console.log("");
 
@@ -235,13 +296,13 @@ async function main() {
     console.log("  Nothing to prune.\n");
   } else {
     console.log(
-      "  " + eligible.length + " match(es), " + totalRows + " upload(s) would be deleted:\n"
+      "  " + eligible.length + " match(es), " + totalRows + " superseded revision(s) would be deleted:\n"
     );
 
     for (const match of eligible) {
       const archive = match.has_compiled
-        ? "compiled archive kept"
-        : "NO COMPILED ARCHIVE — nothing will remain of this match";
+        ? "compiled archive kept, newest upload per squad kept"
+        : "NO COMPILED ARCHIVE — only the newest upload per squad will remain";
 
       console.log("    " + match.match_key);
       console.log(
@@ -249,8 +310,8 @@ async function main() {
           (clubId ? "" : "  club " + match.club_id)
       );
       console.log(
-        "      " + match.row_count + " upload(s) from " + match.device_count +
-          " device(s), " + formatDate(match.oldest) + " to " + formatDate(match.newest)
+        "      " + match.row_count + " revision(s) from " + match.device_count +
+          " squad(s), " + formatDate(match.oldest) + " to " + formatDate(match.newest)
       );
       console.log("      " + archive);
       console.log("");
@@ -262,13 +323,13 @@ async function main() {
 
     console.log(
       "  LEFT ALONE: " + spared.length + " match(es), " + sparedRows +
-        " upload(s) old enough but never absorbed by a roster push:\n"
+        " upload(s) old enough but belonging to squads no roster push absorbed:\n"
     );
 
     for (const match of spared) {
       console.log(
         "    " + match.match_key + '  "' + (match.match_label || "(no match name)") +
-          '"  ' + match.row_count + " upload(s)"
+          '"  ' + match.row_count + " upload(s) across " + match.device_count + " squad(s)"
       );
     }
 
@@ -299,11 +360,16 @@ async function main() {
 
   const clubFilter = clubId ? ` AND club_id = ${sqlQuote(clubId)}` : "";
 
+  // Word for word the same conditions fetchEligible used, via the same two
+  // constants. If these two ever diverge the dry run describes one set of rows
+  // and the delete removes another, which is the worst failure this script
+  // could have: it would be reported as a success.
   runSql(
     `DELETE FROM squad_uploads
       WHERE device_id <> ${sqlQuote(COMPILED_DEVICE)}
-        AND merged_into_roster_revision IS NOT NULL
-        AND uploaded_at < ${cutoff}${clubFilter};`,
+        AND uploaded_at < ${cutoff}${clubFilter}
+        AND ${NOT_NEWEST_REVISION}
+        AND ${SQUAD_WAS_ABSORBED};`,
     remote
   );
 
@@ -316,7 +382,7 @@ async function main() {
   const remaining = fetchEligible(clubId, cutoff, remote);
   const remainingRows = remaining.reduce((sum, m) => sum + Number(m.row_count), 0);
 
-  console.log("\n  Deleted " + (totalRows - remainingRows) + " of " + totalRows + " upload(s).");
+  console.log("\n  Deleted " + (totalRows - remainingRows) + " of " + totalRows + " revision(s).");
 
   if (remainingRows > 0) {
     console.error("  WARNING: " + remainingRows + " still match the criteria. Run again to check.");

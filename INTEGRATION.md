@@ -1,6 +1,6 @@
 # Match Scorekeeper Backend — Client Integration Specification
 
-Spec version 1.3.1, describing backend release v1.2.0.
+Spec version 1.4.0, describing backend release v1.2.1.
 
 Two version numbers, tracking different things: the spec is versioned by its own
 revisions, the backend by its releases, and they are not expected to match. This
@@ -14,7 +14,21 @@ to talk to it, and the client-side behaviour the backend assumes.
 
 Sections 1–6 are the API. Sections 7–11 are the workflow decisions that were
 made deliberately and are not visible from the API alone — read those before
-designing any screen.
+designing any screen. Section 12 is what the server keeps and what a client may
+rely on still being readable; it is a contract, not a note.
+
+### Changes since 1.3.1
+
+- **§4.5** — gains a cross-reference to the retention guarantee. Behaviour
+  unchanged, but note that `?revision=` reaching an older revision is *not*
+  guaranteed, while the default newest-revision read is.
+- **§4.14** — `GET …/squads/{deviceId}/revisions`, listing one squad's upload
+  history so a client can compare a bad upload against the good one before it.
+- **§11** — the retention note read "No purge exists." One did exist when that
+  sentence was written. Corrected, and the substance moved to §12.
+- **§12** — new. **Read this before building anything that opens a past match.**
+  It states which data survives cleanup, which does not, and what a 404 from an
+  old match means.
 
 ### Changes since 1.2
 
@@ -405,6 +419,11 @@ be compared against the good one that preceded it.
 
 Response contains the full row including `payload`, byte-identical to what was
 uploaded. `404 squad_not_found` if nothing matches.
+
+**Without `?revision` this is guaranteed to succeed for any device the match
+lists** (§12.1). With `?revision`, an older revision may have been pruned —
+§4.14 says which still exist. Do not infer that revision *n − 1* is readable
+from the fact that revision *n* is.
 
 ### 4.6 Get the roster
 
@@ -846,6 +865,69 @@ fallback as papering over an error — but the two states are indistinguishable 
 status code, only one of them is reachable, and a test suite running against a
 current server will never catch the regression.
 
+### 4.14 Squad revisions
+
+```
+GET /v1/clubs/{clubId}/matches/{matchKey}/squads/{deviceId}/revisions
+```
+
+```json
+{
+  "ok": true,
+  "club": "x3222665",
+  "match_key": "outdoor|8/15/2026",
+  "device_id": "550e8400-…",
+  "revisions": [
+    {
+      "revision": 3,
+      "squad_key": "1",
+      "squad_label": "1",
+      "device_label": "Club Tablet 2",
+      "entry_count": 8,
+      "schema_version": 1,
+      "app_version": "2.1.1",
+      "app_build": "2026-09-06-e",
+      "content_hash": "6fd977db…",
+      "uploaded_at": 1787848232608,
+      "merged_into_roster_revision": 9
+    }
+  ]
+}
+```
+
+Newest first, capped at 200, no payloads. The squad equivalent of §4.12.
+
+`?revision=` on §4.5 could always reach a specific revision, but nothing said
+which revisions existed — so comparing a bad upload against the one before it
+meant guessing numbers and reading the 404s.
+
+| Status | Meaning |
+|---|---|
+| 200 | The list |
+| 401 | `unauthorized` |
+| 404 | `squad_not_found` — no such device at that match |
+
+**404 rather than an empty list**, matching §4.5. A device cannot have zero
+revisions, so an empty array would be ambiguous between "this device uploaded
+nothing" and "this device was never here". Contrast §4.4, where an empty
+`squads` array is a real answer meaning "nothing uploaded yet".
+
+**A one-entry list is a normal answer, not a truncated one.** Pruning keeps only
+a device's newest revision once a compile has absorbed the squad, so a long
+history exists during a match and through the club's retention window, and not
+beyond it (§12). Render what the list contains; never hard-code the window, and
+never treat a single revision as an error or as missing data.
+
+**`squad_key`, `squad_label` and `device_label` are per revision**, not per
+device. An RO who renames a squad partway through a match leaves revisions under
+two names, and showing that is what explains a history that otherwise looks
+wrong.
+
+**`content_hash` is included** so two revisions can be recognised as identical
+without downloading either. A field-level diff — "revision 3 dropped Smith" —
+is more useful still, but it requires reading payloads, so it belongs
+client-side after fetching two of them with §4.5.
+
 ---
 
 ## 5. Network behaviour
@@ -1119,10 +1201,10 @@ clocks for ordering — tablets at a range are not reliably in sync.
 **`schema_version`** is currently `1` and comes from the payload. Bump it when
 the payload shape changes.
 
-**Retention.** No purge exists. If one is added, a squad upload must never be
-deleted while its `merged_into_roster_revision` is null — it may hold the only
-copy of a shooter added at check-in and never compiled. Roster revisions are
-never pruned.
+**Retention.** See §12. It moved there because clients depend on it, which
+makes it a contract rather than an implementation note. In short: a device's
+newest revision at a match stays readable for as long as the match exists,
+older revisions may be pruned, and roster revisions never are.
 
 **Encryption is not implemented.** Payloads are stored as plain JSON. A later
 stage may add client-side AES-GCM encryption, at which point `payload` carries
@@ -1132,3 +1214,80 @@ payload, so this needs no server-side change beyond a schema addition.
 **Free tier headroom.** 100,000 Worker requests/day, 5M D1 rows read/day, 100,000
 written/day, 5 GB storage. A five-tablet match uses a few hundred requests. Do
 not design around these limits; do not poll aggressively either.
+
+---
+
+## 12. Retention
+
+What the server keeps, what it removes, and what a client may rely on still
+being readable. Squad uploads are append-only but not permanent, so a client
+that assumes otherwise breaks quietly, months later, on old matches.
+
+### 12.1 The guarantee
+
+> **The newest revision of every device at a match stays readable for as long as
+> that match exists on the server.**
+
+Build on this. The practical form:
+
+- If §4.11 lists a match, then for every device in its §4.4 list, §4.5 **without
+  `?revision`** returns 200. There is no state in which a match is listed but
+  its squads cannot be opened.
+- Older revisions may be gone. §4.14 lists which survive. Reaching one with
+  `?revision=` may 404 even though a higher revision reads fine.
+- **A match may be removed in its entirety**, archive included, by deliberate
+  operator action. Afterwards it is absent from §4.11 and every endpoint for it
+  404s. That is a legitimate "this match is no longer on the server", not a
+  failure — say so plainly rather than reporting an error.
+
+The distinction that matters: *match gone because someone removed it* is normal.
+*Match present but unopenable* is a bug, and the guarantee exists to make it
+impossible.
+
+### 12.2 Never pruned
+
+- **Roster revisions.** The whole history, always (§4.12). The club shooter list
+  is the thing worth keeping, and it is never touched by any cleanup.
+- **A match's compiled archive** (§4.10), unless the entire match is removed.
+- **Every revision of a squad no roster push ever absorbed.** Until a compile
+  folds a squad in, a shooter added at check-in on that tablet may exist in
+  those payloads and nowhere else. Cleanup will not touch them, and reports them
+  so somebody goes and looks.
+
+### 12.3 What is removed, and by what
+
+Three operator scripts, run from the project folder against a Cloudflare login.
+Each shows what it will do, refuses by default, and verifies afterwards.
+
+| Removes | Keeps | Default |
+|---|---|---|
+| Superseded revisions of squads a roster absorbed | Newest revision per device, the archive, anything unabsorbed | Older than 90 days, dry run |
+| One named match entirely, archive included | Nothing of that match | No default — the match key must be typed back |
+| All matches before a given date, archives included | Nothing of those matches | No default date at all |
+
+The club shooter list survives all three. Nobody is lost; results are.
+
+Why this exists rather than keeping everything: an RO uploads after every
+shooter, so one 30-shooter squad leaves roughly 30 revisions and a five-squad
+match leaves 150. Storage is irrelevant against D1's allowance. Every one of
+those payloads holds every shooter's name, email and phone, and they accumulate
+in every backup file indefinitely. A squad's newest revision holds the whole
+squad; the 29 before it are prefixes of it.
+
+### 12.4 Deletion is deliberately absent from the app
+
+No endpoint deletes anything. There is no plan to add one.
+
+The tablet credential is stored on every tablet, and tablets go to ranges, get
+borrowed, and get left in cars. A deletion path reachable from the app is a
+deletion path reachable by anyone holding a tablet. Removing data requires the
+project folder and a Cloudflare login — two things a tablet does not have.
+
+**Do not design a delete button.** If a club officer needs something removed,
+that is a conversation with whoever runs their backend, and the friction is the
+feature.
+
+What the app *should* offer is the other half: a way to look at an uploaded
+squad's contents without restoring it over live match state. Deciding a stale
+match is junk requires reading it, `list-unmerged.js` shows only metadata, and
+the person who has to make that call is the one holding a tablet.
