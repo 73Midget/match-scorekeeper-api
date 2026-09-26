@@ -1,6 +1,6 @@
 # Match Scorekeeper Backend — Client Integration Specification
 
-Spec version 1.3.1, describing backend release v1.1.0.
+Spec version 1.3.1, describing backend release v1.2.0.
 
 Two version numbers, tracking different things: the spec is versioned by its own
 revisions, the backend by its releases, and they are not expected to match. This
