@@ -232,6 +232,16 @@ You will be asked to type the club id to confirm.
 Rotate before a match, not during one, and have the new configuration ready to
 distribute.
 
+### See what is outstanding
+
+```bash
+node scripts/list-unmerged.js --remote
+```
+
+Read-only. Squad uploads no compile has absorbed — the first thing to check if
+a shooter seems missing from the club list, and the first thing to run before
+any cleanup. See Retention below.
+
 ---
 
 ## Backups
@@ -301,22 +311,88 @@ surviving copy of a shooter's details. Collect every export first.
 
 ## Retention
 
-There is no purge and none is needed yet. Squad payloads are 10–50 KB, so a
-club running weekly matches uses a few megabytes a year against a 5 GB
-allowance. Storage is not a reason to delete anything.
+Three scripts delete data. All three are dry-run by default and none of them
+ever touch the club shooter list — `rosters` is append-only and nothing prunes
+it, so no cleanup can lose a member.
 
-If a purge is ever added, one rule is not negotiable:
+### Why prune at all
 
-**Never delete a squad upload whose `merged_into_roster_revision` is null.**
+Not storage. An RO uploads after every shooter, so a 30-shooter squad generates
+around 30 revisions in one match and a five-squad match generates 150 — roughly
+4.5 MB. A 40-match season is about 180 MB against a 5 GB allowance, so a club
+would need decades to fill it.
 
-A null there means no roster compile has ever absorbed that squad — and until
-one has, any shooter added at check-in on that tablet exists in that upload and
-nowhere else. Deleting it would silently destroy the only copy of that person's
-contact details.
+The reason is that every one of those payloads holds every shooter's name,
+email and phone, and they all land in the monthly backup file. Pruning is about
+how much personal data is sitting around, not how many bytes.
 
-Reducing exposure is a better argument for deletion than storage is, but it
-points at encrypting payloads rather than deleting them: purging last year's
-matches does nothing for this year's.
+### Routine: drop raw squads, keep the results
+
+```bash
+node scripts/prune-squads.js --remote                  # dry run, 90 days
+node scripts/prune-squads.js --remote --confirm        # delete
+```
+
+Deletes raw squad uploads from matches compiled more than 90 days ago, and
+keeps each match's compiled archive. The archive holds the same people and the
+same scores in one payload rather than 150, so the club keeps a record of every
+match while almost all the personal data goes.
+
+It refuses to touch anything a roster push never absorbed, and reports what it
+left alone. A null `merged_into_roster_revision` means nobody has compiled that
+squad — and until they have, a shooter added at check-in on that tablet exists
+in that payload and nowhere else.
+
+### Looking before deleting
+
+```bash
+node scripts/list-unmerged.js --remote
+node scripts/list-unmerged.js --remote --older-than 90
+```
+
+Read-only. Shows every upload no compile absorbed, grouped by match, and
+separates two cases that call for different decisions: a match nothing ever
+compiled — where the roster may be missing shooters — from a squad that turned
+up after an otherwise-normal compile.
+
+It prints metadata only. To see what is actually in a squad, restore or preview
+it in the app; the server never reads payloads, which is what keeps client-side
+encryption available later.
+
+### Deleting one junk match
+
+```bash
+node scripts/delete-match.js --remote "outdoor|8/14/2026"
+```
+
+Everything for that match, archive included, with no age or merge check. This
+is the only command that can destroy the only copy of a shooter's details, so
+it asks for the match key typed back.
+
+**Quote the match key** — it contains a pipe, and an unquoted pipe is a shell
+pipeline.
+
+Use it for something you have looked at and concluded is junk: an abandoned
+test, a tablet someone started and shut down, a squad uploaded against a
+mistyped match name.
+
+### Deleting old matches entirely
+
+```bash
+node scripts/prune-matches.js --remote --before 2024-01-01
+node scripts/prune-matches.js --remote --before 2024-01-01 --confirm
+```
+
+Drops matches whose every upload predates a date you choose — archives
+included. After this there is no record on the server that those matches
+happened.
+
+There is no default date on purpose. How far back a club keeps its results is a
+judgement only the club can make, and a default would become the answer by
+accident.
+
+**Back up first.** This is the one cleanup whose result cannot be rebuilt from
+anything else on the server.
 
 ---
 
