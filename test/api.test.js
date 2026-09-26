@@ -835,3 +835,28 @@ test("a triple matching nothing is reported, not rejected", async () => {
   assert.equal(body.unmatched.length, 1);
   assert.equal(body.unmatched[0].revision, 999);
 });
+
+test("a compiled archive never appears on the unmerged list", async () => {
+  const matchKey = `outdoor|test-compiled-unmerged-${Date.now()}`;
+
+  await uploadSquad(
+    envelope({
+      match_key: matchKey,
+      device_id: "compiled",
+      device_label: "Compiled results",
+      squad_key: "",
+      payload: JSON.stringify({ compiled: true, stamp: Date.now() }),
+    })
+  );
+
+  const response = await fetch(
+    `${BASE}/v1/clubs/${encodeURIComponent(CLUB)}/squads/unmerged`,
+    { headers: { authorization: `Bearer ${SECRET}` } }
+  );
+  const { unmerged } = await response.json();
+
+  assert.ok(
+    !unmerged.some((s) => s.match_key === matchKey && s.device_id === "compiled"),
+    "a compiled archive is a result, not a squad awaiting compilation"
+  );
+});

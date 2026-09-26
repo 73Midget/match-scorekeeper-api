@@ -636,6 +636,11 @@ export default {
           WHERE s.club_id = ?1
             AND s.merged_into_roster_revision IS NULL
             AND s.uploaded_at >= ?2
+            -- A compiled archive is a match's result, not a squad awaiting
+            -- compilation, and it is never named in merged_squads — so without
+            -- this it is never marked and appears here forever, one row per
+            -- match, on the view meant to surface real problems.
+            AND s.device_id <> 'compiled'
           ORDER BY s.uploaded_at DESC
           LIMIT 200`
       )
