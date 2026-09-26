@@ -203,6 +203,10 @@ them readably, in UTC — not your local time.
 
 ## Destructive commands
 
+Prefer the cleanup scripts above to hand-written SQL. They show what they will
+do before doing it, refuse to touch uploads no compile absorbed, and verify the
+result afterwards. Raw SQL does none of that.
+
 There is no undo and no point-in-time recovery on the free plan.
 
 ```bash
@@ -224,15 +228,63 @@ exactly what it touches.** `DELETE FROM clubs` with no `WHERE` empties the table
 
 ## Management scripts
 
+All take `--remote` for the deployed database, and default to local without it.
+None of them use `$env:API_*` — those are only for the test suite. These run
+wrangler directly, authenticated by `wrangler login`.
+
+### Read-only
+
 ```bash
 node scripts/list-clubs.js --remote
-node scripts/create-club.js "Club Name" --remote --url https://your-url.workers.dev
-node scripts/rotate-secret.js <club-id> --remote --url https://your-url.workers.dev
-node scripts/export-backup.js --remote --out backups
+node scripts/list-unmerged.js --remote
+node scripts/list-unmerged.js --remote --older-than 90
 ```
 
-`create-club` and `rotate-secret` print a secret **once**. It is not stored
-anywhere recoverable. Save it before closing the window.
+`list-unmerged` separates two cases: a match nothing ever compiled (the roster
+may be missing shooters) from a squad that arrived after a normal compile.
+Metadata only — to see inside a squad, use the app.
+
+### Clubs
+
+```bash
+node scripts/create-club.js "Club Name" --remote --url https://your-url.workers.dev
+node scripts/rotate-secret.js <club-id> --remote --url https://your-url.workers.dev
+```
+
+Add `--qr` to either for a scannable setup code.
+
+Both print a secret **once**. It is not stored anywhere recoverable. Save it
+before closing the window.
+
+### Backup
+
+```bash
+npm run backup
+```
+
+Then copy the file somewhere that is **not** Cloudflare.
+
+### Cleanup — all dry-run by default
+
+```bash
+node scripts/prune-squads.js --remote                       # raw squads, 90d+, keeps archives
+node scripts/prune-squads.js --remote --confirm
+
+node scripts/prune-matches.js --remote --before 2024-01-01  # whole matches, archives too
+node scripts/prune-matches.js --remote --before 2024-01-01 --confirm
+
+node scripts/delete-match.js --remote "outdoor|8/14/2026"   # one match, everything
+```
+
+**Quote the match key.** It contains a pipe, and an unquoted pipe is a shell
+pipeline — the command gets split in half.
+
+Nothing here touches `rosters`. The shooter list is never pruned.
+
+`prune-squads` refuses to delete anything no roster push absorbed, and says
+what it left alone. `delete-match` has no such guard — it is the one command
+that can destroy the only copy of a shooter's details, which is why it asks for
+the match key typed back.
 
 ---
 
