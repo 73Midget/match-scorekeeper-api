@@ -23,6 +23,30 @@ if (!SECRET) {
   process.exit(1);
 }
 
+// Refuse to run against a deployed backend unless asked explicitly.
+//
+// This suite pushes rosters, and a roster push replaces the whole shooter list.
+// Run against a real club it puts test data on top of a club's members and
+// leaves junk match rows behind — which happened on 2026-09-26, and cost an
+// evening to unpick.
+//
+// The opt-in is deliberately an environment variable rather than a flag: it has
+// to be set on purpose, in the window where it applies, and it is visible in
+// the same place the credentials are.
+const LOCAL = /^https?:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/.test(BASE);
+
+if (!LOCAL && process.env.API_ALLOW_REMOTE !== "1") {
+  console.error(`API_BASE is ${BASE}, which is not a local server.`);
+  console.error("");
+  console.error("These tests push rosters and create match rows. Against a real");
+  console.error("club that replaces the shooter list with test data.");
+  console.error("");
+  console.error("Use a throwaway club and set API_ALLOW_REMOTE=1 if you mean it.");
+  process.exit(1);
+}
+
+console.log(`Testing against ${BASE}, club ${CLUB}`);
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
