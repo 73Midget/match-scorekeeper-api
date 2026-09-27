@@ -4,6 +4,7 @@
  * Usage:
  *   node scripts/export-backup.js --remote
  *   node scripts/export-backup.js --remote --out C:\Users\me\Drive\club-backups
+ *   node scripts/export-backup.js --remote --again
  *
  * Run this monthly. It is the difference between losing a Cloudflare account
  * being an inconvenience and being a catastrophe: with a dump, recovery is an
@@ -32,13 +33,38 @@ const WRANGLER = resolve("node_modules", "wrangler", "bin", "wrangler.js");
  * Sorts chronologically as plain text, which means a folder of these is in
  * order without anyone having to think about it.
  *
+ * One quirk, noted so nobody treats it as a bug: within a single day the plain
+ * dated name sorts after that day's timestamped ones, because "." sorts above
+ * "-". Days still order correctly against each other, which is what matters
+ * when the question is "what is the newest dump".
+ *
  * @param {boolean} remote
+ * @param {boolean} withTime Include hours and minutes, for a second run.
  * @returns {string} e.g. "match-scorekeeper-2026-08-28.sql"
  */
-function backupFilename(remote) {
-  const date = new Date().toISOString().slice(0, 10);
+function backupFilename(remote, withTime) {
+  const now = new Date();
+
+  // Local date, not toISOString(). UTC would name a backup taken on a Saturday
+  // evening in the eastern US with Sunday's date — confusing on its own, and it
+  // makes the same-day check below leaky: two backups either side of UTC
+  // midnight get different names and neither one trips it.
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+
+  const date = year + "-" + month + "-" + day;
   const which = remote ? "" : "-local";
-  return DATABASE + which + "-" + date + ".sql";
+
+  if (!withTime) return DATABASE + which + "-" + date + ".sql";
+
+  // Local clock here too, for the same reason: this suffix exists so a person
+  // can tell two of today's backups apart, and they are reading their own
+  // watch.
+  const hours = String(now.getHours()).padStart(2, "0");
+  const minutes = String(now.getMinutes()).padStart(2, "0");
+
+  return DATABASE + which + "-" + date + "-" + hours + minutes + ".sql";
 }
 
 /**
@@ -64,11 +90,15 @@ function summarize(remote) {
 function main() {
   const args = process.argv.slice(2);
   const remote = args.includes("--remote");
+  const again = args.includes("--again");
 
   const outIndex = args.indexOf("--out");
   const outDir = outIndex !== -1 ? args[outIndex + 1] : ".";
 
-  if (!outDir) {
+  // The startsWith check catches "--out --again", where the flag after --out
+  // would otherwise be taken as a directory name and a backup would land in a
+  // folder called "--again".
+  if (!outDir || outDir.startsWith("--")) {
     console.error("--out needs a directory path.");
     process.exit(1);
   }
@@ -80,15 +110,20 @@ function main() {
     console.log("\n  Created directory: " + outDir);
   }
 
-  const outPath = join(outDir, backupFilename(remote));
+  const outPath = join(outDir, backupFilename(remote, again));
 
-  // Refuse to overwrite. Two backups on one day is unusual enough that it is
-  // more likely a mistake than an intention, and a backup silently replacing
-  // an earlier one is the wrong default for a file whose whole purpose is
-  // being there later.
+  // Refuse to overwrite unless asked. A backup silently replacing an earlier
+  // one is the wrong default for a file whose whole purpose is being there
+  // later, and an accidental second run should stop rather than do that.
+  //
+  // But a deliberate second backup in one day is a real and important case. On
+  // 2026-09-26 a recovery needed one dump from before the damage and another
+  // from after the restore, and that is exactly when nobody wants to be
+  // renaming files by hand. Hence --again rather than no guard at all.
   if (existsSync(outPath)) {
     console.error("\n  A backup for today already exists:\n    " + outPath);
-    console.error("\n  Move or rename it first if you want another.\n");
+    console.error("\n  Pass --again to write a second one with the time in its name,");
+    console.error("  or move the existing file first.\n");
     process.exit(1);
   }
 

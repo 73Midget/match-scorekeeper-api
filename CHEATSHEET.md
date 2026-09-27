@@ -201,28 +201,34 @@ them readably, in UTC — not your local time.
 
 ---
 
-## Destructive commands
+### Keep destructive SQL on one line
 
-Prefer the cleanup scripts above to hand-written SQL. They show what they will
-do before doing it, refuse to touch uploads no compile absorbed, and verify the
-result afterwards. Raw SQL does none of that.
+Typing SQL by hand into `wrangler d1 execute --command`? Put the whole
+statement on one line, with the `WHERE` beside the verb:
 
-There is no undo and no point-in-time recovery on the free plan.
+    npx wrangler d1 execute match-scorekeeper --remote --command "DELETE FROM rosters WHERE club_id = 'x3222665' AND revision BETWEEN 3 AND 19;"
 
-```bash
-# Delete one club and everything belonging to it (cascades)
-npx wrangler d1 execute match-scorekeeper --remote \
-  --command "DELETE FROM clubs WHERE club_id = 'the-id';"
+Not this, however much more readable it looks:
 
-# Clear all match data, keep clubs — LOCAL ONLY unless you mean it
-npx wrangler d1 execute match-scorekeeper --local \
-  --command "DELETE FROM squad_uploads; DELETE FROM rosters;"
-```
+    $sql = @"
+    DELETE FROM squad_uploads
+     WHERE club_id = 'x3222665'
+       AND match_key IN ( ... )
+    "@
+    npx wrangler d1 execute match-scorekeeper --remote --command $sql
 
-**Every destructive command against production needs a `WHERE` clause naming
-exactly what it touches.** `DELETE FROM clubs` with no `WHERE` empties the table.
+PowerShell hands a multi-line string to a native command through Windows
+command-line quoting, and the statement can arrive truncated at the first
+newline. `DELETE FROM squad_uploads` is a complete, valid statement on its own.
+On 2026-09-26 it emptied that table for every club on the backend.
 
-`npm run backup` first. Every time. It takes seconds.
+The rule is not "avoid here-strings". It is that **no prefix of a destructive
+statement may itself be a valid destructive statement.** Written on one line, a
+truncated command is a syntax error and the database is untouched.
+
+Hand-typed commands only. The scripts in `scripts/` pass multi-line SQL safely,
+for reasons recorded in `scripts/lib/d1.js` — don't read this rule and conclude
+they are broken.
 
 ---
 

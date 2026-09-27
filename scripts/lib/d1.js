@@ -11,8 +11,12 @@
  *    avoids both problems.
  *
  *  - --command rather than --file. On a remote database wrangler treats --file
- *    as an import operation, which needs permissions a plain query does not
- *    and fails with an authentication error.
+ *    as an import: it uploads the file, takes the database briefly offline and
+ *    asks for confirmation before running. That is the wrong shape for a script
+ *    issuing one small statement at a time. It also needs permissions a plain
+ *    query does not, and has failed here with an authentication error — though
+ *    it does work when the credentials allow it, which is how the 2026-09-26
+ *    restore was done by hand.
  *
  *  - Failures are re-thrown with wrangler's own output attached. Swallowing
  *    them makes a hard error look like an empty result set, which is a
@@ -27,6 +31,24 @@
  * SQL is passed as an argument, which is safe only because every statement in
  * these scripts is built here or hardcoded by the caller. Values that come
  * from a person must be escaped with sqlQuote below.
+ *
+ * It matters that it is passed as one element of an argv array and never
+ * through a shell. spawnSync with shell: false hands each argument to wrangler
+ * exactly as written, newlines included, so the multi-line statements in the
+ * cleanup scripts arrive whole.
+ *
+ * That is the only thing separating those scripts from the same SQL typed at a
+ * prompt. On 2026-09-26 a multi-line DELETE pasted into PowerShell reached
+ * wrangler truncated at its first newline, and that first line —
+ * `DELETE FROM squad_uploads` — is a complete, valid statement. It emptied the
+ * table for every club on the backend. The SQL was correct; the delivery was
+ * not.
+ *
+ * So the multi-line SQL in prune-squads.js and its siblings is safe as long as
+ * it travels this path. Changing runSql to shell: true, to a single command
+ * string, or to an exec-style call would end that, and every DELETE in
+ * scripts/ would become a statement whose first line is its own worst case.
+ * Do not make that change without first rewriting those queries onto one line.
  */
 
 import { execFileSync } from "node:child_process";
