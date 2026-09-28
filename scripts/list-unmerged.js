@@ -17,6 +17,7 @@
  */
 
 import { runSql, sqlQuote } from "./lib/d1.js";
+import { positional, flagValue } from "./lib/args.js";
 
 /** Device id reserved for a match's compiled results. */
 const COMPILED_DEVICE = "compiled";
@@ -70,32 +71,6 @@ function column(value, width) {
   return text.length > width
     ? text.slice(0, width - 1) + "…"
     : text.padEnd(width);
-}
-
-/**
- * Read the positional club id, ignoring values that belong to flags.
- *
- * A flag's value does not start with "--", so a naive search for the first
- * non-flag argument picks up the 30 in "--older-than 30" and treats it as a
- * club id. The failure is quiet: the listing simply comes back empty, as it
- * would for a club with nothing outstanding.
- *
- * @param {string[]} args
- * @returns {string|null}
- */
-function positionalClubId(args) {
-  /** Flags that consume the argument after them. */
-  const takesValue = new Set(["--older-than"]);
-
-  for (let i = 0; i < args.length; i++) {
-    if (args[i].startsWith("--")) {
-      if (takesValue.has(args[i])) i++;
-      continue;
-    }
-    return args[i];
-  }
-
-  return null;
 }
 
 /**
@@ -228,12 +203,11 @@ function main() {
   const args = process.argv.slice(2);
   const remote = args.includes("--remote");
 
-  const clubId = positionalClubId(args);
+  const clubId = positional(args, ["--older-than"]);
 
-  const olderIndex = args.indexOf("--older-than");
   let olderThan = null;
-  if (olderIndex !== -1) {
-    olderThan = Number(args[olderIndex + 1]);
+  if (args.includes("--older-than")) {
+    olderThan = Number(flagValue(args, "--older-than"));
     if (!Number.isInteger(olderThan) || olderThan < 0) {
       console.error("--older-than needs a whole number of days.");
       process.exit(1);

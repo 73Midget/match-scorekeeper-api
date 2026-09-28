@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Create a club and print its setup code.
  *
  * Usage:
@@ -16,6 +16,7 @@
  */
 
 import { runSql, sqlQuote } from "./lib/d1.js";
+import { positional, flagValue } from "./lib/args.js";
 import {
   generateClubId,
   generateSecret,
@@ -27,7 +28,10 @@ import {
 async function main() {
   const args = process.argv.slice(2);
 
-  const displayName = args.find((a) => !a.startsWith("--"));
+  // --url consumes the argument after it, so the club name has to be found
+  // with that in mind. A plain search for the first non-flag argument would
+  // return the URL when the flag comes first.
+  const displayName = positional(args, ["--url"]);
   if (!displayName) {
     console.error('Usage: node scripts/create-club.js "Club Name" [--remote] [--url <api-url>]');
     process.exit(1);
@@ -42,8 +46,7 @@ async function main() {
   }
 
   const remote = args.includes("--remote");
-  const urlIndex = args.indexOf("--url");
-  const apiUrl = urlIndex !== -1 ? args[urlIndex + 1] : null;
+  const apiUrl = flagValue(args, "--url");
   const withQr = args.includes("--qr");
 
   const clubId = generateClubId();

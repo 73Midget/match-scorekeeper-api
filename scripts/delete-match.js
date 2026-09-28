@@ -27,6 +27,7 @@
 
 import { createInterface } from "node:readline/promises";
 import { runSql, sqlQuote } from "./lib/d1.js";
+import { positional, flagValue } from "./lib/args.js";
 
 /** Device id reserved for a match's compiled results. */
 const COMPILED_DEVICE = "compiled";
@@ -98,33 +99,13 @@ async function confirm(matchKey) {
   }
 }
 
-/**
- * Read the positional match key, skipping values that belong to flags.
- *
- * @param {string[]} args
- * @returns {string|null}
- */
-function positionalMatchKey(args) {
-  const takesValue = new Set(["--club"]);
-
-  for (let i = 0; i < args.length; i++) {
-    if (args[i].startsWith("--")) {
-      if (takesValue.has(args[i])) i++;
-      continue;
-    }
-    return args[i];
-  }
-
-  return null;
-}
-
 async function main() {
   const args = process.argv.slice(2);
   const remote = args.includes("--remote");
-  const matchKey = positionalMatchKey(args);
-
-  const clubIndex = args.indexOf("--club");
-  const clubId = clubIndex !== -1 ? args[clubIndex + 1] : null;
+  // --club consumes the argument after it. Without accounting for that, a
+  // command with the flag first would take the club id as the match key.
+  const matchKey = positional(args, ["--club"]);
+  const clubId = flagValue(args, "--club");
 
   if (!matchKey) {
     console.error('Usage: node scripts/delete-match.js [--remote] "<match-key>" [--club <id>]');

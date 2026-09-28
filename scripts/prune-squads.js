@@ -55,6 +55,7 @@
 import { readdirSync, statSync, existsSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { runSql, sqlQuote } from "./lib/d1.js";
+import { positional, flagValue } from "./lib/args.js";
 
 /** Device id reserved for a match's compiled results. */
 const COMPILED_DEVICE = "compiled";
@@ -239,40 +240,15 @@ function formatDate(ms) {
   });
 }
 
-/**
- * Read the positional club id, skipping values that belong to flags.
- *
- * A flag's value does not start with "--", so a naive search picks up the 180
- * in "--older-than 180" and treats it as a club id. Here that would quietly
- * scope a delete to a club that does not exist and report nothing to do.
- *
- * @param {string[]} args
- * @returns {string|null}
- */
-function positionalClubId(args) {
-  const takesValue = new Set(["--older-than"]);
-
-  for (let i = 0; i < args.length; i++) {
-    if (args[i].startsWith("--")) {
-      if (takesValue.has(args[i])) i++;
-      continue;
-    }
-    return args[i];
-  }
-
-  return null;
-}
-
 async function main() {
   const args = process.argv.slice(2);
   const remote = args.includes("--remote");
   const doIt = args.includes("--confirm");
-  const clubId = positionalClubId(args);
+  const clubId = positional(args, ["--older-than"]);
 
   let days = DEFAULT_DAYS;
-  const olderIndex = args.indexOf("--older-than");
-  if (olderIndex !== -1) {
-    days = Number(args[olderIndex + 1]);
+  if (args.includes("--older-than")) {
+    days = Number(flagValue(args, "--older-than"));
     if (!Number.isInteger(days) || days < 1) {
       console.error("--older-than needs a whole number of days, at least 1.");
       process.exit(1);

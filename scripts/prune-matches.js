@@ -27,6 +27,7 @@
 import { readdirSync, statSync, existsSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { runSql, sqlQuote } from "./lib/d1.js";
+import { positional, flagValue } from "./lib/args.js";
 
 /** Device id reserved for a match's compiled results. */
 const COMPILED_DEVICE = "compiled";
@@ -156,34 +157,13 @@ async function confirm(expected) {
   }
 }
 
-/**
- * Read the positional club id, skipping values that belong to flags.
- *
- * @param {string[]} args
- * @returns {string|null}
- */
-function positionalClubId(args) {
-  const takesValue = new Set(["--before"]);
-
-  for (let i = 0; i < args.length; i++) {
-    if (args[i].startsWith("--")) {
-      if (takesValue.has(args[i])) i++;
-      continue;
-    }
-    return args[i];
-  }
-
-  return null;
-}
-
 async function main() {
   const args = process.argv.slice(2);
   const remote = args.includes("--remote");
   const doIt = args.includes("--confirm");
-  const clubId = positionalClubId(args);
+  const clubId = positional(args, ["--before"]);
 
-  const beforeIndex = args.indexOf("--before");
-  if (beforeIndex === -1) {
+  if (!args.includes("--before")) {
     console.error("Usage: node scripts/prune-matches.js [--remote] --before YYYY-MM-DD [club-id] [--confirm]");
     console.error("");
     console.error("There is no default date. How far back a club keeps its results");
@@ -191,7 +171,7 @@ async function main() {
     process.exit(1);
   }
 
-  const cutoff = parseDate(args[beforeIndex + 1]);
+  const cutoff = parseDate(flagValue(args, "--before"));
   if (cutoff === null) {
     console.error("--before needs a real date as YYYY-MM-DD, for example 2024-01-01.");
     process.exit(1);

@@ -18,6 +18,7 @@
 
 import { createInterface } from "node:readline/promises";
 import { runSql, sqlQuote } from "./lib/d1.js";
+import { positional, flagValue } from "./lib/args.js";
 import {
   generateSecret,
   hashSecret,
@@ -49,7 +50,11 @@ async function confirm(clubId) {
 async function main() {
   const args = process.argv.slice(2);
 
-  const clubId = args.find((a) => !a.startsWith("--"));
+  // --url consumes the argument after it. Without accounting for that, a
+  // command with the flag first would take the URL as the club id — and here
+  // that means rotating the wrong club's secret, locking out a set of tablets
+  // that were working fine.
+  const clubId = positional(args, ["--url"]);
   if (!clubId) {
     console.error("Usage: node scripts/rotate-secret.js <club-id> [--remote] [--url <api-url>]");
     console.error("Run scripts/list-clubs.js to see club ids.");
@@ -57,8 +62,7 @@ async function main() {
   }
 
   const remote = args.includes("--remote");
-  const urlIndex = args.indexOf("--url");
-  const apiUrl = urlIndex !== -1 ? args[urlIndex + 1] : null;
+  const apiUrl = flagValue(args, "--url");
   const withQr = args.includes("--qr");
 
   // Look the club up first, so the confirmation prompt can name it and so a

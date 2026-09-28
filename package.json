@@ -10,7 +10,8 @@
     "test": "node --test test/api.test.js test/secrets.test.js",
     "test:prune": "node --test test/prune.test.js",
     "create-club": "node scripts/create-club.js",
-    "backup": "node scripts/export-backup.js --remote --out backups"
+    "backup": "node scripts/export-backup.js --remote --out backups",
+    "console": "node scripts/console.js"
   },
 
   "keywords": [],
